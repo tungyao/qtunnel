@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <chrono>
+#include <vector>
 
 #ifdef _WIN32
 #include <mstcpip.h>
@@ -25,6 +27,7 @@
 #include <openssl/err.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hpke.h>
 #include <openssl/pem.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
@@ -147,6 +150,62 @@ inline bool openssl_global_init() {
         OpenSSL_add_ssl_algorithms();
 #endif
     });
+    return true;
+}
+
+inline bool decode_base64(std::string text, std::vector<std::uint8_t>& out) {
+    out.clear();
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (unsigned char ch : text) {
+        if (!std::isspace(ch)) {
+            normalized.push_back(static_cast<char>(ch));
+        }
+    }
+    if (normalized.empty()) {
+        return true;
+    }
+    if ((normalized.size() % 4) != 0) {
+        return false;
+    }
+
+    auto decode_char = [](char ch) -> int {
+        if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+        if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
+        if (ch >= '0' && ch <= '9') return ch - '0' + 52;
+        if (ch == '+') return 62;
+        if (ch == '/') return 63;
+        if (ch == '=') return -2;
+        return -1;
+    };
+
+    out.reserve((normalized.size() / 4) * 3);
+    for (std::size_t i = 0; i < normalized.size(); i += 4) {
+        const int a = decode_char(normalized[i]);
+        const int b = decode_char(normalized[i + 1]);
+        const int c = decode_char(normalized[i + 2]);
+        const int d = decode_char(normalized[i + 3]);
+        if (a < 0 || b < 0 || c == -1 || d == -1) {
+            out.clear();
+            return false;
+        }
+
+        const std::uint32_t block = (static_cast<std::uint32_t>(a) << 18) |
+                                    (static_cast<std::uint32_t>(b) << 12) |
+                                    (static_cast<std::uint32_t>(c < 0 ? 0 : c) << 6) |
+                                    static_cast<std::uint32_t>(d < 0 ? 0 : d);
+        out.push_back(static_cast<std::uint8_t>((block >> 16) & 0xffu));
+        if (c != -2) {
+            out.push_back(static_cast<std::uint8_t>((block >> 8) & 0xffu));
+        }
+        if (d != -2) {
+            out.push_back(static_cast<std::uint8_t>(block & 0xffu));
+        }
+        if ((c == -2 && d != -2) || (i + 4 != normalized.size() && (c == -2 || d == -2))) {
+            out.clear();
+            return false;
+        }
+    }
     return true;
 }
 
@@ -366,10 +425,10 @@ private:
 #if defined(OPENSSL_IS_BORINGSSL)
         const unsigned char h2_proto[] = {'h', '2'};
         if (SSL_add_application_settings(ssl_.get(), h2_proto, sizeof(h2_proto), nullptr, 0) != 1) {
-            last_error_ = openssl_error_string("SSL_add_application_settings 澶辫触");
+            last_error_ = openssl_error_string("SSL_add_application_settings failed");
             return false;
         }
-        // 濡傛灉闇€瑕佷娇鐢ㄦ柊 codepoint锛屽彲璋冪敤锛歋SL_set_alps_use_new_codepoint(ssl_.get(), 1);
+        SSL_set_alps_use_new_codepoint(ssl_.get(), 1);
 #endif
         return true;
     }
@@ -387,54 +446,91 @@ public:
             return false;
         }
 
-        socket_t sock = connect_tcp(host, port, last_error_);
-        if (sock == kInvalidSocket) return false;
-
-        ctx_.reset(SSL_CTX_new(TLS_client_method()));
-        if (!ctx_) {
-            last_error_ = "SSL_CTX_new(client) failed";
-            close_socket(sock);
-            return false;
+        bool use_ech = enable_ech_;
+        std::vector<std::uint8_t> current_ech_config_list;
+        if (use_ech) {
+            if (ech_config_.empty()) {
+                last_error_ = "ECH is enabled but no config list was provided";
+                return false;
+            }
+            if (!decode_base64(ech_config_, current_ech_config_list) || current_ech_config_list.empty()) {
+                last_error_ = "Invalid base64 ECHConfigList";
+                return false;
+            }
         }
 
-        configure_chrome_ctx_full(server_name);
-        SSL_CTX_set_verify(ctx_.get(), SSL_VERIFY_NONE, nullptr);
+        const int max_attempts = use_ech ? 2 : 1;
+        for (int attempt = 0; attempt < max_attempts; ++attempt) {
+            socket_t sock = connect_tcp(host, port, last_error_);
+            if (sock == kInvalidSocket) {
+                return false;
+            }
 
-        ssl_.reset(SSL_new(ctx_.get()));
-        if (!ssl_) {
-            last_error_ = "SSL_new(client) failed";
-            close_socket(sock);
-            return false;
-        }
+            ctx_.reset(SSL_CTX_new(TLS_client_method()));
+            if (!ctx_) {
+                last_error_ = "SSL_CTX_new(client) failed";
+                close_socket(sock);
+                return false;
+            }
 
-        if (!configure_chrome_ssl()) {
-            close_socket(sock);
-            ssl_.reset();
-            return false;
-        }
+            configure_chrome_ctx_full(server_name);
+            SSL_CTX_set_verify(ctx_.get(), SSL_VERIFY_NONE, nullptr);
 
-        socket_ = sock;
-        SSL_set_fd(ssl_.get(), static_cast<int>(socket_));
-        if (!server_name.empty()) {
-            SSL_set_tlsext_host_name(ssl_.get(), server_name.c_str());
-        }
+            ssl_.reset(SSL_new(ctx_.get()));
+            if (!ssl_) {
+                last_error_ = "SSL_new(client) failed";
+                close_socket(sock);
+                return false;
+            }
 
-        ERR_clear_error();
-        const int connect_ret = SSL_connect(ssl_.get());
-        if (connect_ret != 1) {
+            if (!configure_chrome_ssl()) {
+                close_socket(sock);
+                ssl_.reset();
+                return false;
+            }
+            if (!apply_client_ech_config(current_ech_config_list)) {
+                close_socket(sock);
+                ssl_.reset();
+                return false;
+            }
+
+            socket_ = sock;
+            SSL_set_fd(ssl_.get(), static_cast<int>(socket_));
+            if (!server_name.empty()) {
+                SSL_set_tlsext_host_name(ssl_.get(), server_name.c_str());
+            }
+
+            ERR_clear_error();
+            const int connect_ret = SSL_connect(ssl_.get());
+            if (connect_ret == 1) {
+                if (!verify_h2_alpn()) {
+                    shutdown();
+                    return false;
+                }
+
+                cache_peer_fingerprint();
+                connected_ = true;
+                return true;
+            }
+
+#if defined(OPENSSL_IS_BORINGSSL)
+            if (use_ech && attempt == 0 && should_retry_ech()) {
+                cache_ech_rejection_state();
+                const std::vector<std::uint8_t> next_ech_config_list = ech_retry_config_list_;
+                shutdown();
+                current_ech_config_list = next_ech_config_list;
+                use_ech = !current_ech_config_list.empty();
+                continue;
+            }
+#endif
+
             last_error_ = ssl_io_error_string("SSL_connect failed", ssl_.get(), connect_ret);
             shutdown();
             return false;
         }
 
-        if (!verify_h2_alpn()) {
-            shutdown();
-            return false;
-        }
-
-        cache_peer_fingerprint();
-        connected_ = true;
-        return true;
+        last_error_ = "ECH retry was rejected by the server";
+        return false;
     }
     // ====================== 客户端 Chrome 146 指纹核心 ======================
 
@@ -542,6 +638,9 @@ public:
 
     void shutdown() {
         connected_ = false;
+        ech_accepted_ = false;
+        ech_name_override_.clear();
+        ech_retry_config_list_.clear();
         ssl_.reset();
         ctx_.reset();
         cert_.reset();
@@ -558,8 +657,27 @@ public:
     std::string negotiated_tls_version() const { return negotiated_tls_version_; }
     std::string negotiated_cipher() const { return negotiated_cipher_; }
     std::string requested_server_name() const { return requested_server_name_; }
+    bool ech_accepted() const { return ech_accepted_; }
+    std::string ech_name_override() const { return ech_name_override_; }
+    bool has_ech_retry_config_list() const { return !ech_retry_config_list_.empty(); }
     socket_t raw_socket() const { return socket_; }
     bool connected() const { return connected_; }
+
+    void set_ech_config_base64(const std::string& ech_config_base64) {
+        ech_config_ = ech_config_base64;
+        enable_ech_ = !ech_config_.empty();
+    }
+
+    void set_enable_ech(bool enabled) {
+        enable_ech_ = enabled;
+        if (!enable_ech_) {
+            ech_config_.clear();
+        }
+    }
+
+    void set_enable_ech_grease(bool enabled) {
+        enable_ech_grease_ = enabled;
+    }
 
 private:
     using SSL_CTX_ptr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
@@ -671,6 +789,57 @@ private:
             SSL_CTX_set_alpn_protos(ctx_.get(), kClientAlpn, sizeof(kClientAlpn));
         }
     }
+
+
+    bool apply_client_ech_config(const std::vector<std::uint8_t>& ech_config_list) {
+#if defined(OPENSSL_IS_BORINGSSL)
+        SSL_set_enable_ech_grease(ssl_.get(), enable_ech_grease_ ? 1 : 0);
+        if (ech_config_list.empty()) {
+            return true;
+        }
+        if (SSL_set1_ech_config_list(ssl_.get(), ech_config_list.data(), ech_config_list.size()) != 1) {
+            last_error_ = openssl_error_string("SSL_set1_ech_config_list failed");
+            return false;
+        }
+        return true;
+#else
+        (void)ech_config_list;
+        if (enable_ech_) {
+            last_error_ = "ECH requires BoringSSL";
+            return false;
+        }
+        return true;
+#endif
+    }
+
+    bool should_retry_ech() const {
+#if defined(OPENSSL_IS_BORINGSSL)
+        const unsigned long code = ERR_peek_last_error();
+        return code != 0 && ERR_GET_REASON(code) == SSL_R_ECH_REJECTED;
+#else
+        return false;
+#endif
+    }
+
+    void cache_ech_rejection_state() {
+        ech_name_override_.clear();
+        ech_retry_config_list_.clear();
+#if defined(OPENSSL_IS_BORINGSSL)
+        const char* override_name = nullptr;
+        size_t override_name_len = 0;
+        SSL_get0_ech_name_override(ssl_.get(), &override_name, &override_name_len);
+        if (override_name != nullptr && override_name_len > 0) {
+            ech_name_override_.assign(override_name, override_name_len);
+        }
+
+        const std::uint8_t* retry_configs = nullptr;
+        size_t retry_configs_len = 0;
+        SSL_get0_ech_retry_configs(ssl_.get(), &retry_configs, &retry_configs_len);
+        if (retry_configs != nullptr && retry_configs_len > 0) {
+            ech_retry_config_list_.assign(retry_configs, retry_configs + retry_configs_len);
+        }
+#endif
+    }
     // ====================== 其余辅助函数保持不变 ======================
     void cache_negotiated_alpn() {
         negotiated_alpn_.clear();
@@ -687,6 +856,7 @@ private:
         negotiated_tls_version_.clear();
         negotiated_cipher_.clear();
         requested_server_name_.clear();
+        ech_accepted_ = false;
 
         const char* version = SSL_get_version(ssl_.get());
         if (version != nullptr) {
@@ -705,6 +875,9 @@ private:
         if (sni != nullptr) {
             requested_server_name_ = sni;
         }
+#if defined(OPENSSL_IS_BORINGSSL)
+        ech_accepted_ = SSL_ech_accepted(ssl_.get()) == 1;
+#endif
     }
 
     bool verify_h2_alpn() {
@@ -842,6 +1015,10 @@ private:
     std::string negotiated_tls_version_;
     std::string negotiated_cipher_;
     std::string requested_server_name_;
+    bool enable_ech_grease_ = true;
+    bool ech_accepted_ = false;
+    std::string ech_name_override_;
+    std::vector<std::uint8_t> ech_retry_config_list_;
     bool connected_ = false;
 };
 

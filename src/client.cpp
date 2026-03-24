@@ -55,6 +55,8 @@ struct ClientConfig {
     std::uint16_t server_port = 8443;
     std::uint16_t listen_port = 1080;
     std::string auth_password;
+    std::string ech_config;
+    bool enable_ech_grease = true;
     LogLevel log_level = LogLevel::Info;
 };
 
@@ -370,6 +372,8 @@ void ClientRuntime::io_loop() {
         running_ = false;
     };
 
+    tls_.set_enable_ech_grease(cfg_.enable_ech_grease);
+    tls_.set_ech_config_base64(cfg_.ech_config);
     if (!tls_.connect_client(cfg_.server_host, cfg_.server_port, cfg_.server_host)) {
         finish_with_error(tls_.last_error());
         return;
@@ -378,6 +382,10 @@ void ClientRuntime::io_loop() {
     PROXY_LOG(Debug, "[client] TLS version: " << tls_.negotiated_tls_version());
     PROXY_LOG(Debug, "[client] TLS cipher: " << tls_.negotiated_cipher());
     PROXY_LOG(Debug, "[client] TLS ALPN: " << (tls_.negotiated_alpn().empty() ? "<none>" : tls_.negotiated_alpn()));
+    PROXY_LOG(Debug, "[client] TLS ECH accepted: " << (tls_.ech_accepted() ? "yes" : "no"));
+    if (!tls_.ech_name_override().empty()) {
+        PROXY_LOG(Debug, "[client] TLS ECH name override: " << tls_.ech_name_override());
+    }
 
     nghttp2_session_callbacks_new(&callbacks);
     nghttp2_session_callbacks_set_on_begin_headers_callback(callbacks, &ClientRuntime::on_begin_headers);
@@ -926,6 +934,10 @@ ClientConfig parse_args(int argc, char** argv) {
             cfg.listen_port = static_cast<std::uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--auth-password" && i + 1 < argc) {
             cfg.auth_password = argv[++i];
+        } else if (arg == "--ech-config" && i + 1 < argc) {
+            cfg.ech_config = argv[++i];
+        } else if (arg == "--disable-ech-grease") {
+            cfg.enable_ech_grease = false;
         } else if (arg == "--log-level" && i + 1 < argc) {
             LogLevel level = LogLevel::Info;
             if (parse_log_level(argv[++i], level)) {
@@ -945,6 +957,8 @@ void print_usage() {
         << "  --listen <port>      本地 SOCKS5 监听端口, 默认 1080\n"
         << "  --auth-password <pw> 发送到服务端 /api/tunnel/* 的预共享密码\n"
         << "  --log-level <level>  日志级别: error|warn|info|debug, 默认 info\n\n"
+        << "  --ech-config <b64>   base64-encoded ECHConfigList\n"
+        << "  --disable-ech-grease do not send GREASE ECH without a config list\n"
         << "行为:\n"
         << "  1. 建立 1 条长期 HTTP/2 TLS 连接\n"
         << "  2. 使用 open stream 创建隧道会话\n"
@@ -952,7 +966,8 @@ void print_usage() {
         << "  4. 使用一个或多个 upload stream 上传数据帧\n\n"
         << "示例:\n"
         << "  client 127.0.0.1:8443\n"
-        << "  client 117.72.179.59:8443 --listen 1088 --auth-password secret123\n";
+        << "  client 117.72.179.59:8443 --listen 1088 --auth-password secret123\n"
+        << "  client example.com:8443 --ech-config <base64-ech-config-list>\n";
 }
 
 } // namespace
