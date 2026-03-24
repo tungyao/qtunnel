@@ -84,11 +84,60 @@ inline std::string openssl_error_string(const std::string& prefix) {
     return prefix + ": " + buf;
 }
 
+inline std::string ssl_io_error_string(const std::string& prefix, SSL* ssl, int ret) {
+    const int ssl_error = SSL_get_error(ssl, ret);
+    std::ostringstream oss;
+    oss << prefix << ": SSL_get_error=" << ssl_error;
+
+    bool has_queue_error = false;
+    for (unsigned long code = ERR_get_error(); code != 0; code = ERR_get_error()) {
+        char buf[256] = {};
+        ERR_error_string_n(code, buf, sizeof(buf));
+        if (!has_queue_error) {
+            oss << " errors=[";
+            has_queue_error = true;
+        } else {
+            oss << "; ";
+        }
+        oss << buf;
+    }
+    if (has_queue_error) {
+        oss << "]";
+    }
+
+    switch (ssl_error) {
+        case SSL_ERROR_ZERO_RETURN:
+            oss << " peer closed the TLS session";
+            break;
+        case SSL_ERROR_WANT_READ:
+            oss << " need more network data";
+            break;
+        case SSL_ERROR_WANT_WRITE:
+            oss << " need socket writable";
+            break;
+        case SSL_ERROR_SYSCALL:
+            if (ret == 0) {
+                oss << " peer closed the TCP connection";
+            } else {
+                oss << " syscall=" << socket_error_string();
+            }
+            break;
+        default:
+            if (!has_queue_error && ret == 0) {
+                oss << " peer closed the connection unexpectedly";
+            }
+            break;
+    }
+    return oss.str();
+}
+
 inline bool openssl_global_init() {
     static std::once_flag once;
     std::call_once(once, []() {
 #if defined(OPENSSL_IS_BORINGSSL)
+        PROXY_LOG(Info, "[server] OPENSSL_IS_BORINGSSL: " << 1);
         OPENSSL_init_ssl(0, nullptr);
+
 #elif defined(OPENSSL_VERSION_NUMBER) && OPENSSL_VERSION_NUMBER >= 0x10100000L
         OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
         OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS | OPENSSL_INIT_ADD_ALL_DIGESTS, nullptr);
@@ -305,8 +354,8 @@ private:
 #if defined(OPENSSL_IS_BORINGSSL)
         // Chrome 发送 "h2" 的 SETTINGS（具体值在 HTTP/2 层再精细控制）
         // 这里先在 TLS 层声明支持 h2 的 application settings
-        const unsigned char h2_proto[] = {'h', '2'};
-        SSL_set_alps_use_new_codepoint(ssl_.get(), 1);
+        // const unsigned char h2_proto[] = {'h', '2'};
+        // SSL_set_alps_use_new_codepoint(ssl_.get(), 1);
         // SSL-level ALPS configuration is applied after SSL_new().
         // 如果需要使用新 codepoint，可调用：SSL_set_alps_use_new_codepoint(ssl_.get(), 1);
 #endif
@@ -334,7 +383,7 @@ public:
     bool connect_client(const std::string& host, std::uint16_t port, const std::string& server_name) {
         shutdown();
         if (!openssl_global_init()) {
-            last_error_ = "OpenSSL 初始化失败";
+            last_error_ = "OpenSSL init failed";
             return false;
         }
 
@@ -343,19 +392,17 @@ public:
 
         ctx_.reset(SSL_CTX_new(TLS_client_method()));
         if (!ctx_) {
-            last_error_ = "SSL_CTX_new(client) 失败";
+            last_error_ = "SSL_CTX_new(client) failed";
             close_socket(sock);
             return false;
         }
 
-        // 【核心】Chrome 146 + 剩余指纹完整配置
         configure_chrome_ctx_full(server_name);
-
         SSL_CTX_set_verify(ctx_.get(), SSL_VERIFY_NONE, nullptr);
 
         ssl_.reset(SSL_new(ctx_.get()));
         if (!ssl_) {
-            last_error_ = "SSL_new(client) 失败";
+            last_error_ = "SSL_new(client) failed";
             close_socket(sock);
             return false;
         }
@@ -372,8 +419,10 @@ public:
             SSL_set_tlsext_host_name(ssl_.get(), server_name.c_str());
         }
 
-        if (SSL_connect(ssl_.get()) != 1) {
-            last_error_ = openssl_error_string("SSL_connect 失败");
+        ERR_clear_error();
+        const int connect_ret = SSL_connect(ssl_.get());
+        if (connect_ret != 1) {
+            last_error_ = ssl_io_error_string("SSL_connect failed", ssl_.get(), connect_ret);
             shutdown();
             return false;
         }
@@ -395,21 +444,21 @@ public:
                        const std::string& key_file = std::string()) {
         shutdown();
         if (!openssl_global_init()) {
-            last_error_ = "OpenSSL 初始化失败";
+            last_error_ = "OpenSSL init failed";
             close_socket(accepted_socket);
             return false;
         }
 
         ctx_.reset(SSL_CTX_new(TLS_server_method()));
         if (!ctx_) {
-            last_error_ = "SSL_CTX_new(server) 失败";
+            last_error_ = "SSL_CTX_new(server) failed";
             close_socket(accepted_socket);
             return false;
         }
-        configure_common_ctx(true);  // 服务端仍使用原配置
+        configure_common_ctx(true);
         if (!cert_file.empty() || !key_file.empty()) {
             if (cert_file.empty() || key_file.empty()) {
-                last_error_ = "必须同时提供 cert_file 和 key_file";
+                last_error_ = "cert_file and key_file must be provided together";
                 close_socket(accepted_socket);
                 return false;
             }
@@ -424,7 +473,7 @@ public:
         if (SSL_CTX_use_certificate(ctx_.get(), cert_.get()) != 1 ||
             SSL_CTX_use_PrivateKey(ctx_.get(), pkey_.get()) != 1 ||
             SSL_CTX_check_private_key(ctx_.get()) != 1) {
-            last_error_ = openssl_error_string("加载服务端证书失败");
+            last_error_ = openssl_error_string("Load server certificate failed");
             close_socket(accepted_socket);
             return false;
         }
@@ -432,13 +481,15 @@ public:
         socket_ = accepted_socket;
         ssl_.reset(SSL_new(ctx_.get()));
         if (!ssl_) {
-            last_error_ = "SSL_new(server) 失败";
+            last_error_ = "SSL_new(server) failed";
             shutdown();
             return false;
         }
         SSL_set_fd(ssl_.get(), static_cast<int>(socket_));
-        if (SSL_accept(ssl_.get()) != 1) {
-            last_error_ = openssl_error_string("SSL_accept 失败");
+        ERR_clear_error();
+        const int accept_ret = SSL_accept(ssl_.get());
+        if (accept_ret != 1) {
+            last_error_ = ssl_io_error_string("SSL_accept failed", ssl_.get(), accept_ret);
             shutdown();
             return false;
         }
@@ -550,7 +601,7 @@ private:
 #if defined(OPENSSL_IS_BORINGSSL)
         SSL_CTX_set_grease_enabled(ctx, 1);           // 必须开启 GREASE（Chrome 关键特性）
         // 如果你的 BoringSSL fork 支持 extension permutation，可在这里打开
-        // SSL_CTX_set_permute_extensions(ctx, 1);    // 可选，部分 fork 才有
+        SSL_CTX_set_permute_extensions(ctx, 1);    // 可选，部分 fork 才有
 #endif
     }
 
@@ -600,9 +651,19 @@ private:
         SSL_CTX_set_min_proto_version(ctx_.get(), TLS1_2_VERSION);
         SSL_CTX_set_max_proto_version(ctx_.get(), TLS1_3_VERSION);
 #if defined(OPENSSL_IS_BORINGSSL)
-        SSL_CTX_set_cipher_list(ctx_.get(), "TLS_AES_256_GCM_SHA384");
+        SSL_CTX_set_cipher_list(
+            ctx_.get(),
+            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:"
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:"
+            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384");
 #else
-        SSL_CTX_set_ciphersuites(ctx_.get(), "TLS_AES_256_GCM_SHA384");
+        SSL_CTX_set_ciphersuites(
+            ctx_.get(),
+            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256");
+        SSL_CTX_set_cipher_list(
+            ctx_.get(),
+            "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
+            "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384");
 #endif
         if (server_mode) {
             SSL_CTX_set_alpn_select_cb(ctx_.get(), &TlsSocket::select_alpn_h2, nullptr);
@@ -610,7 +671,6 @@ private:
             SSL_CTX_set_alpn_protos(ctx_.get(), kClientAlpn, sizeof(kClientAlpn));
         }
     }
-
     // ====================== 其余辅助函数保持不变 ======================
     void cache_negotiated_alpn() {
         negotiated_alpn_.clear();
