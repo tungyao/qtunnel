@@ -4,6 +4,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,6 +37,56 @@ inline std::uint32_t to_be32(std::uint32_t v) {
 
 inline std::vector<std::uint8_t> to_bytes(const std::string& text) {
     return std::vector<std::uint8_t>(text.begin(), text.end());
+}
+
+inline bool supports_http2_padding(std::uint8_t frame_type) {
+    return frame_type == 0x0 || frame_type == 0x1 || frame_type == 0x5;
+}
+
+inline std::size_t select_http2_padded_length(std::uint8_t frame_type, std::size_t payload_len,
+                                              std::size_t max_payload_len) {
+    if (!supports_http2_padding(frame_type) || payload_len >= max_payload_len) {
+        return payload_len;
+    }
+
+    const std::size_t max_extra = std::min<std::size_t>(max_payload_len - payload_len, 96);
+    if (max_extra == 0) {
+        return payload_len;
+    }
+
+    static std::mutex mutex;
+    static std::mt19937 rng(std::random_device{}());
+    std::lock_guard<std::mutex> lock(mutex);
+
+    // Bias towards small padding while still occasionally emitting larger bursts.
+    std::uniform_int_distribution<int> profile_dist(0, 99);
+    const int profile = profile_dist(rng);
+
+    std::size_t extra = 0;
+    if (profile < 55) {
+        std::uniform_int_distribution<std::size_t> dist(0, std::min<std::size_t>(max_extra, 16));
+        extra = dist(rng);
+    } else if (profile < 85) {
+        const std::size_t upper = std::min<std::size_t>(max_extra, 40);
+        const std::size_t lower = std::min<std::size_t>(upper, 8);
+        std::uniform_int_distribution<std::size_t> dist(lower, upper);
+        extra = dist(rng);
+    } else {
+        const std::size_t upper = std::min<std::size_t>(max_extra, 96);
+        const std::size_t lower = std::min<std::size_t>(upper, 24);
+        std::uniform_int_distribution<std::size_t> dist(lower, upper);
+        extra = dist(rng);
+    }
+
+    if (extra == 0) {
+        return payload_len;
+    }
+
+    if (frame_type == 0x0 && payload_len > 1024) {
+        extra = std::min<std::size_t>(extra, 32);
+    }
+
+    return payload_len + extra;
 }
 
 inline void append_frame(std::vector<std::uint8_t>& buffer, FrameType type, std::uint32_t stream_id,

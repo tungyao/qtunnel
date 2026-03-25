@@ -44,6 +44,7 @@ using proxy::parse_log_level;
 using proxy::perform_socks5_handshake;
 using proxy::send_socks5_reply;
 using proxy::set_log_level;
+using proxy::select_http2_padded_length;
 using proxy::socket_t;
 using proxy::LogLevel;
 using proxy::Socks5HandshakeStatus;
@@ -187,6 +188,8 @@ private:
     static int on_frame_recv(nghttp2_session* session, const nghttp2_frame* frame, void* user_data);
     static int on_stream_close(nghttp2_session* session, int32_t stream_id, uint32_t error_code,
                                void* user_data);
+    static nghttp2_ssize select_padding(nghttp2_session* session, const nghttp2_frame* frame,
+                                        size_t max_payloadlen, void* user_data);
 
     ClientConfig cfg_;
     socket_t listener_ = kInvalidSocket;
@@ -393,6 +396,7 @@ void ClientRuntime::io_loop() {
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, &ClientRuntime::on_data_chunk_recv);
     nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, &ClientRuntime::on_frame_recv);
     nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, &ClientRuntime::on_stream_close);
+    nghttp2_session_callbacks_set_select_padding_callback2(callbacks, &ClientRuntime::select_padding);
 
     if (nghttp2_session_client_new(&h2_, callbacks, this) != 0) {
         nghttp2_session_callbacks_del(callbacks);
@@ -660,6 +664,12 @@ int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_
         self->running_ = false;
     }
     return 0;
+}
+
+nghttp2_ssize ClientRuntime::select_padding(nghttp2_session* /*session*/, const nghttp2_frame* frame,
+                                            size_t max_payloadlen, void* /*user_data*/) {
+    return static_cast<nghttp2_ssize>(
+        select_http2_padded_length(frame->hd.type, frame->hd.length, max_payloadlen));
 }
 
 void ClientRuntime::queue_frame(FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload) {
