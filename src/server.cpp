@@ -33,6 +33,11 @@
 
 namespace {
 
+constexpr std::size_t kTunnelIoChunkSize = 64 * 1024;
+constexpr long kTunnelPollIntervalUsec = 5000;
+constexpr std::int32_t kHttp2WindowSize = 1 * 1024 * 1024;
+constexpr std::uint32_t kHttp2MaxFrameSize = 256 * 1024;
+
 using proxy::close_socket;
 using proxy::connect_tcp;
 using proxy::decode_open_request;
@@ -44,6 +49,7 @@ using proxy::kInvalidSocket;
 using proxy::parse_frames;
 using proxy::parse_log_level;
 using proxy::recv_exact;
+using proxy::send_all_raw;
 using proxy::send_exact;
 using proxy::set_log_level;
 using proxy::select_http2_padded_length;
@@ -342,6 +348,7 @@ private:
         ResponseMode response_mode = ResponseMode::None;
         std::vector<std::uint8_t> response_body;
         std::size_t response_offset = 0;
+        bool response_started = false;
     };
 
     bool initialize();
@@ -349,6 +356,7 @@ private:
     bool flush_session();
     void loop();
     void handle_request(int32_t stream_id);
+    void handle_upload_frames(RequestState& request);
     void submit_static_response(int32_t stream_id, int status, const std::string& content_type,
                                 const std::vector<std::uint8_t>& body);
     void enqueue_downlink(FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload);
@@ -433,7 +441,13 @@ bool Http2ServerConnection::initialize() {
     }
     nghttp2_session_callbacks_del(callbacks);
 
-    if (nghttp2_submit_settings(h2_, NGHTTP2_FLAG_NONE, nullptr, 0) != 0 || !flush_session()) {
+    const nghttp2_settings_entry settings[] = {
+        {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, static_cast<uint32_t>(kHttp2WindowSize)},
+        {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, kHttp2MaxFrameSize},
+    };
+    if (nghttp2_submit_settings(h2_, NGHTTP2_FLAG_NONE, settings, 2) != 0 ||
+        nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, 0, kHttp2WindowSize) != 0 ||
+        !flush_session()) {
         PROXY_LOG(Error, "[server] 发送 HTTP/2 SETTINGS 失败");
         return false;
     }
@@ -491,14 +505,14 @@ void Http2ServerConnection::loop() {
         }
 
         timeval tv{};
-        tv.tv_usec = 100000;
+        tv.tv_usec = kTunnelPollIntervalUsec;
         const int ready = ::select(static_cast<int>(maxfd + 1), &readfds, nullptr, nullptr, &tv);
         if (ready < 0) {
             continue;
         }
 
         if (ready > 0 && FD_ISSET(tls_.raw_socket(), &readfds)) {
-            std::array<std::uint8_t, 16384> buf{};
+            std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
             const int ret = tls_.read(buf.data(), buf.size());
             if (ret <= 0) {
                 break;
@@ -519,7 +533,7 @@ void Http2ServerConnection::loop() {
             if (!FD_ISSET(kv.second.sock, &readfds)) {
                 continue;
             }
-            std::array<std::uint8_t, 4096> buf{};
+            std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
 #ifdef _WIN32
             const int ret = ::recv(kv.second.sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
 #else
@@ -546,6 +560,7 @@ void Http2ServerConnection::submit_static_response(int32_t stream_id, int status
     request.response_mode = RequestState::ResponseMode::StaticBody;
     request.response_body = body;
     request.response_offset = 0;
+    request.response_started = true;
 
     auto header_fields = make_response_header_fields(status, content_type);
     if (status == 200 && content_type.find("text/html") != std::string::npos) {
@@ -657,6 +672,10 @@ void Http2ServerConnection::handle_request(int32_t stream_id) {
         request.response_mode = RequestState::ResponseMode::EventStream;
         request.response_offset = 0;
         event_stream_id_ = stream_id;
+        if (nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, stream_id, kHttp2WindowSize) != 0) {
+            submit_static_response(stream_id, 500, "text/plain", to_bytes("failed to set event stream window"));
+            return;
+        }
 
         const auto header_fields = make_response_header_fields(200, "application/octet-stream");
         std::vector<nghttp2_nv> headers;
@@ -673,61 +692,18 @@ void Http2ServerConnection::handle_request(int32_t stream_id) {
     }
 
     if (request.method == "POST" && request.path == "/api/tunnel/upload") {
+        if (request.response_started) {
+            return;
+        }
         if (!tunnel_opened_) {
             submit_static_response(stream_id, 409, "text/plain", to_bytes("open stream required first"));
             return;
         }
-
-        std::vector<std::pair<FrameHeader, std::vector<std::uint8_t>>> frames;
-        if (!parse_frames(request.body, frames)) {
-            submit_static_response(stream_id, 400, "text/plain", to_bytes("bad frame body"));
-            return;
-        }
-
-        for (const auto& item : frames) {
-            const FrameType type = static_cast<FrameType>(item.first.type);
-            const std::uint32_t tunnel_stream_id = proxy::to_be32(item.first.stream_id);
-            if (type == FrameType::Open) {
-                std::uint8_t atyp = 0;
-                std::string requested_host;
-                std::uint16_t requested_port = 0;
-                if (!decode_open_request(item.second, atyp, requested_host, requested_port)) {
-                    enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail("bad open request"));
-                    continue;
-                }
-
-                std::string error;
-                socket_t upstream = kInvalidSocket;
-                if (!open_upstream_channel(config_, atyp, requested_host, requested_port, upstream, error)) {
-                    enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail(error));
-                    continue;
-                }
-
-                streams_[tunnel_stream_id] = UpstreamStream{tunnel_stream_id, upstream};
-                enqueue_downlink(FrameType::OpenOk, tunnel_stream_id, encode_open_ok());
-            } else if (type == FrameType::Data) {
-                const auto stream_it = streams_.find(tunnel_stream_id);
-                if (stream_it == streams_.end()) {
-                    continue;
-                }
-#ifdef _WIN32
-                const int ret = ::send(stream_it->second.sock, reinterpret_cast<const char*>(item.second.data()),
-                                       static_cast<int>(item.second.size()), 0);
-#else
-                const int ret = static_cast<int>(::send(stream_it->second.sock, item.second.data(),
-                                                        item.second.size(), 0));
-#endif
-                if (ret <= 0) {
-                    close_logical_stream(tunnel_stream_id, true);
-                }
-            } else if (type == FrameType::Close) {
-                close_logical_stream(tunnel_stream_id, false);
-            } else if (type == FrameType::Ping) {
-                enqueue_downlink(FrameType::Pong, 0, item.second);
-            }
-        }
-
         submit_static_response(stream_id, 200, "text/plain", to_bytes("ok"));
+        if (nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, stream_id, kHttp2WindowSize) != 0) {
+            PROXY_LOG(Warn, "[server] 设置 upload stream 窗口失败 stream=" << stream_id);
+        }
+        handle_upload_frames(request);
         return;
     }
 
@@ -738,6 +714,52 @@ void Http2ServerConnection::handle_request(int32_t stream_id) {
     }
 
     submit_static_response(stream_id, 404, "text/plain", to_bytes("not found"));
+}
+
+void Http2ServerConnection::handle_upload_frames(RequestState& request) {
+    std::vector<std::pair<FrameHeader, std::vector<std::uint8_t>>> frames;
+    if (!consume_frames(request.body, frames)) {
+        request.body.clear();
+        return;
+    }
+
+    for (const auto& item : frames) {
+        const FrameType type = static_cast<FrameType>(item.first.type);
+        const std::uint32_t tunnel_stream_id = proxy::to_be32(item.first.stream_id);
+        if (type == FrameType::Open) {
+            std::uint8_t atyp = 0;
+            std::string requested_host;
+            std::uint16_t requested_port = 0;
+            if (!decode_open_request(item.second, atyp, requested_host, requested_port)) {
+                enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail("bad open request"));
+                continue;
+            }
+
+            std::string error;
+            socket_t upstream = kInvalidSocket;
+            if (!open_upstream_channel(config_, atyp, requested_host, requested_port, upstream, error)) {
+                enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail(error));
+                continue;
+            }
+
+            streams_[tunnel_stream_id] = UpstreamStream{tunnel_stream_id, upstream};
+            enqueue_downlink(FrameType::OpenOk, tunnel_stream_id, encode_open_ok());
+        } else if (type == FrameType::Data) {
+            const auto stream_it = streams_.find(tunnel_stream_id);
+            if (stream_it == streams_.end()) {
+                continue;
+            }
+            std::string error;
+            if (!send_all_raw(stream_it->second.sock, item.second.data(), item.second.size(), error)) {
+                PROXY_LOG(Debug, "[server] 上游发送失败 stream=" << tunnel_stream_id << " error=" << error);
+                close_logical_stream(tunnel_stream_id, true);
+            }
+        } else if (type == FrameType::Close) {
+            close_logical_stream(tunnel_stream_id, false);
+        } else if (type == FrameType::Ping) {
+            enqueue_downlink(FrameType::Pong, 0, item.second);
+        }
+    }
 }
 
 nghttp2_ssize Http2ServerConnection::read_response_body(nghttp2_session* /*session*/, int32_t /*stream_id*/, uint8_t* buf,
@@ -823,11 +845,22 @@ int Http2ServerConnection::on_data_chunk_recv(nghttp2_session* /*session*/, uint
         return 0;
     }
     it->second.body.insert(it->second.body.end(), data, data + len);
+    if (it->second.method == "POST" && it->second.path == "/api/tunnel/upload") {
+        self->handle_upload_frames(it->second);
+    }
     return 0;
 }
 
 int Http2ServerConnection::on_frame_recv(nghttp2_session* /*session*/, const nghttp2_frame* frame, void* user_data) {
     auto* self = static_cast<Http2ServerConnection*>(user_data);
+    if (frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_REQUEST) {
+        const auto it = self->requests_.find(frame->hd.stream_id);
+        if (it != self->requests_.end() &&
+            it->second.method == "POST" && it->second.path == "/api/tunnel/upload" &&
+            !it->second.response_started) {
+            self->handle_request(frame->hd.stream_id);
+        }
+    }
     if ((frame->hd.type == NGHTTP2_HEADERS && frame->headers.cat == NGHTTP2_HCAT_REQUEST) ||
         frame->hd.type == NGHTTP2_DATA) {
         if ((frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0) {

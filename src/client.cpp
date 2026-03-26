@@ -32,6 +32,11 @@
 
 namespace {
 
+constexpr std::size_t kTunnelIoChunkSize = 64 * 1024;
+constexpr long kTunnelPollIntervalUsec = 5000;
+constexpr std::int32_t kHttp2WindowSize = 1 * 1024 * 1024;
+constexpr std::uint32_t kHttp2MaxFrameSize = 256 * 1024;
+
 using proxy::close_socket;
 using proxy::consume_frames;
 using proxy::decode_open_fail;
@@ -43,6 +48,7 @@ using proxy::parse_frames;
 using proxy::parse_log_level;
 using proxy::perform_socks5_handshake;
 using proxy::send_socks5_reply;
+using proxy::send_all_raw;
 using proxy::set_log_level;
 using proxy::select_http2_padded_length;
 using proxy::socket_t;
@@ -142,11 +148,17 @@ private:
             UntilStreamClose
         };
 
+        enum class BodyMode {
+            Static,
+            Streaming
+        };
+
         std::string method;
         std::string path;
         std::string content_type;
         std::vector<std::uint8_t> body;
         std::size_t body_offset = 0;
+        BodyMode body_mode = BodyMode::Static;
         int status = 0;
         bool success = false;
         bool done = false;
@@ -163,8 +175,8 @@ private:
                              const std::vector<std::uint8_t>& body, const std::string& content_type,
                              RequestState::WaitMode wait_mode, bool long_lived, int* status_out = nullptr);
     bool start_event_stream();
+    bool start_upload_stream();
     void io_loop();
-    void upload_loop();
     void accept_and_pump_loop();
     void accept_one();
     void pump_local_socket(const std::shared_ptr<LocalStream>& stream);
@@ -210,6 +222,9 @@ private:
     std::mutex upload_mutex_;
     std::condition_variable upload_cv_;
     std::vector<std::uint8_t> upload_buffer_;
+    std::size_t upload_buffer_offset_ = 0;
+    std::atomic<bool> upload_resume_needed_{false};
+    std::shared_ptr<RequestState> upload_request_;
 
     std::mutex streams_mutex_;
     std::map<std::uint32_t, std::shared_ptr<LocalStream>> streams_;
@@ -217,11 +232,13 @@ private:
     std::vector<std::uint8_t> downlink_buffer_;
 
     int32_t event_stream_id_ = -1;
+    int32_t upload_stream_id_ = -1;
 };
 
 ClientRuntime::~ClientRuntime() {
     const bool was_running = running_.exchange(false);
     upload_cv_.notify_all();
+    upload_resume_needed_ = true;
     if (was_running) {
         int ignored_status = 0;
         submit_request_sync("POST", "/api/tunnel/close", {}, "text/plain",
@@ -231,17 +248,14 @@ ClientRuntime::~ClientRuntime() {
         close_socket(listener_);
     }
     tls_.shutdown();
-    if (upload_thread_.joinable()) {
-        upload_thread_.join();
-    }
     if (io_thread_.joinable()) {
         io_thread_.join();
     }
+    close_all_streams();
     if (h2_ != nullptr) {
         nghttp2_session_del(h2_);
         h2_ = nullptr;
     }
-    close_all_streams();
 }
 
 bool ClientRuntime::wait_for_io_ready() {
@@ -306,6 +320,51 @@ bool ClientRuntime::start_event_stream() {
         io_error_ = "建立事件流失败, HTTP " + std::to_string(status);
         return false;
     }
+    if (nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, event_stream_id_, kHttp2WindowSize) != 0) {
+        io_error_ = "设置 events stream 窗口失败";
+        return false;
+    }
+    return true;
+}
+
+bool ClientRuntime::start_upload_stream() {
+    auto request = std::make_shared<RequestState>();
+    request->method = "POST";
+    request->path = "/api/tunnel/upload";
+    request->content_type = "application/octet-stream";
+    request->wait_mode = RequestState::WaitMode::UntilHeaders;
+    request->long_lived = true;
+    request->body_mode = RequestState::BodyMode::Streaming;
+
+    {
+        std::lock_guard<std::mutex> lock(requests_mutex_);
+        pending_requests_.push_back(request);
+    }
+
+    std::unique_lock<std::mutex> lock(request->mutex);
+    const bool completed = request->cv.wait_for(lock, std::chrono::seconds(15), [&] {
+        return request->done || !running_;
+    });
+    if (!completed) {
+        request->done = true;
+        request->success = false;
+        request->error = "等待服务端 upload stream 响应超时";
+    }
+    if (!request->success && !request->error.empty()) {
+        io_error_ = request->error;
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> upload_lock(upload_mutex_);
+        upload_request_ = request;
+    }
+    upload_stream_id_ = request->stream_id;
+    if (nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, upload_stream_id_, kHttp2WindowSize) != 0) {
+        io_error_ = "设置 upload stream 窗口失败";
+        return false;
+    }
+    upload_resume_needed_ = true;
     return true;
 }
 
@@ -356,7 +415,16 @@ bool ClientRuntime::start() {
         return false;
     }
 
-    upload_thread_ = std::thread(&ClientRuntime::upload_loop, this);
+    PROXY_LOG(Info, "[client] 正在建立上行 upload stream ...");
+    if (!start_upload_stream()) {
+        PROXY_LOG(Error, "[client] 启动 upload stream 失败: " << io_error_);
+        running_ = false;
+        tls_.shutdown();
+        if (io_thread_.joinable()) {
+            io_thread_.join();
+        }
+        return false;
+    }
     PROXY_LOG(Info, "[client] HTTP/2 TLS 连接已建立到 " << cfg_.server_host << ":" << cfg_.server_port);
     if (!peer_fingerprint_.empty()) {
         PROXY_LOG(Debug, "[client] 服务器证书 SHA-256 指纹: " << peer_fingerprint_);
@@ -405,7 +473,13 @@ void ClientRuntime::io_loop() {
     }
     nghttp2_session_callbacks_del(callbacks);
 
-    if (nghttp2_submit_settings(h2_, NGHTTP2_FLAG_NONE, nullptr, 0) != 0 || !flush_session()) {
+    const nghttp2_settings_entry settings[] = {
+        {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, static_cast<uint32_t>(kHttp2WindowSize)},
+        {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, kHttp2MaxFrameSize},
+    };
+    if (nghttp2_submit_settings(h2_, NGHTTP2_FLAG_NONE, settings, 2) != 0 ||
+        nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, 0, kHttp2WindowSize) != 0 ||
+        !flush_session()) {
         finish_with_error("发送 HTTP/2 SETTINGS 失败");
         return;
     }
@@ -414,16 +488,25 @@ void ClientRuntime::io_loop() {
     io_ready_ = true;
 
     while (running_) {
+        if (upload_stream_id_ >= 0 && upload_resume_needed_.exchange(false)) {
+            nghttp2_session_resume_data(h2_, upload_stream_id_);
+            if (!flush_session()) {
+                io_error_ = "恢复 upload stream 失败";
+                running_ = false;
+                break;
+            }
+        }
+
         process_request_queue();
 
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(tls_.raw_socket(), &readfds);
         timeval tv{};
-        tv.tv_usec = 100000;
+        tv.tv_usec = kTunnelPollIntervalUsec;
         const int ready = ::select(static_cast<int>(tls_.raw_socket() + 1), &readfds, nullptr, nullptr, &tv);
         if (ready > 0 && FD_ISSET(tls_.raw_socket(), &readfds)) {
-            std::array<std::uint8_t, 16384> buf{};
+            std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
             const int ret = tls_.read(buf.data(), buf.size());
             if (ret <= 0) {
                 io_error_ = tls_.last_error().empty() ? "HTTP/2 连接已断开" : tls_.last_error();
@@ -482,7 +565,7 @@ void ClientRuntime::process_request_queue() {
         }
         nghttp2_data_provider2 provider{};
         nghttp2_data_provider2* provider_ptr = nullptr;
-        if (!request->body.empty()) {
+        if (request->body_mode == RequestState::BodyMode::Streaming || !request->body.empty()) {
             provider.source.ptr = request.get();
             provider.read_callback = &ClientRuntime::read_request_body;
             provider_ptr = &provider;
@@ -532,8 +615,35 @@ bool ClientRuntime::flush_session() {
 
 nghttp2_ssize ClientRuntime::read_request_body(nghttp2_session* /*session*/, int32_t /*stream_id*/, uint8_t* buf,
                                                size_t length, uint32_t* data_flags, nghttp2_data_source* source,
-                                               void* /*user_data*/) {
+                                               void* user_data) {
+    auto* self = static_cast<ClientRuntime*>(user_data);
     auto* request = static_cast<RequestState*>(source->ptr);
+    if (request->body_mode == RequestState::BodyMode::Streaming) {
+        std::lock_guard<std::mutex> lock(self->upload_mutex_);
+        const std::size_t available = self->upload_buffer_.size() - self->upload_buffer_offset_;
+        if (available == 0) {
+            if (!self->running_) {
+                *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+                return 0;
+            }
+            return NGHTTP2_ERR_DEFERRED;
+        }
+
+        const std::size_t copy_len = available < length ? available : length;
+        std::memcpy(buf, self->upload_buffer_.data() + self->upload_buffer_offset_, copy_len);
+        self->upload_buffer_offset_ += copy_len;
+
+        if (self->upload_buffer_offset_ == self->upload_buffer_.size()) {
+            self->upload_buffer_.clear();
+            self->upload_buffer_offset_ = 0;
+        } else if (self->upload_buffer_offset_ >= kTunnelIoChunkSize) {
+            self->upload_buffer_.erase(self->upload_buffer_.begin(),
+                                       self->upload_buffer_.begin() + static_cast<std::ptrdiff_t>(self->upload_buffer_offset_));
+            self->upload_buffer_offset_ = 0;
+        }
+        return static_cast<nghttp2_ssize>(copy_len);
+    }
+
     const std::size_t remaining = request->body.size() - request->body_offset;
     const std::size_t copy_len = remaining < length ? remaining : length;
     if (copy_len > 0) {
@@ -601,7 +711,7 @@ int ClientRuntime::on_frame_recv(nghttp2_session* /*session*/, const nghttp2_fra
         request = it->second;
     }
 
-    if (frame->hd.type == NGHTTP2_HEADERS && request->wait_mode == RequestState::WaitMode::UntilHeaders &&
+        if (frame->hd.type == NGHTTP2_HEADERS && request->wait_mode == RequestState::WaitMode::UntilHeaders &&
         frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
         {
             std::lock_guard<std::mutex> lock(request->mutex);
@@ -613,7 +723,11 @@ int ClientRuntime::on_frame_recv(nghttp2_session* /*session*/, const nghttp2_fra
         }
         request->cv.notify_all();
         if (request->long_lived) {
-            self->event_stream_id_ = frame->hd.stream_id;
+            if (request->path == "/api/tunnel/events") {
+                self->event_stream_id_ = frame->hd.stream_id;
+            } else if (request->path == "/api/tunnel/upload") {
+                self->upload_stream_id_ = frame->hd.stream_id;
+            }
         }
         return 0;
     }
@@ -641,7 +755,8 @@ int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_
         const auto it = self->active_requests_.find(stream_id);
         if (it != self->active_requests_.end()) {
             request = it->second;
-            if (!request->long_lived || stream_id != self->event_stream_id_) {
+            if (!request->long_lived ||
+                (stream_id != self->event_stream_id_ && stream_id != self->upload_stream_id_)) {
                 self->active_requests_.erase(it);
             }
         }
@@ -662,6 +777,9 @@ int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_
     if (stream_id == self->event_stream_id_ && self->running_) {
         self->io_error_ = "下行事件流已关闭";
         self->running_ = false;
+    } else if (stream_id == self->upload_stream_id_ && self->running_) {
+        self->io_error_ = "上行 upload stream 已关闭";
+        self->running_ = false;
     }
     return 0;
 }
@@ -677,37 +795,7 @@ void ClientRuntime::queue_frame(FrameType type, std::uint32_t stream_id, const s
         std::lock_guard<std::mutex> lock(upload_mutex_);
         proxy::append_frame(upload_buffer_, type, stream_id, payload);
     }
-    upload_cv_.notify_one();
-}
-
-void ClientRuntime::upload_loop() {
-    while (running_) {
-        std::vector<std::uint8_t> batch;
-        {
-            std::unique_lock<std::mutex> lock(upload_mutex_);
-            upload_cv_.wait_for(lock, std::chrono::milliseconds(50), [&] {
-                return !upload_buffer_.empty() || !running_;
-            });
-            batch.swap(upload_buffer_);
-        }
-
-        if (!running_) {
-            break;
-        }
-        if (batch.empty()) {
-            continue;
-        }
-
-        int status = 0;
-        if (!submit_request_sync("POST", "/api/tunnel/upload", batch, "application/octet-stream",
-                                 RequestState::WaitMode::UntilStreamClose, false, &status) ||
-            status != 200) {
-            PROXY_LOG(Error, "[client] upload 失败: "
-                                << (io_error_.empty() ? ("HTTP " + std::to_string(status)) : io_error_));
-            running_ = false;
-            break;
-        }
-    }
+    upload_resume_needed_ = true;
 }
 
 void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
@@ -760,13 +848,9 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
             if (!stream) {
                 continue;
             }
-#ifdef _WIN32
-            const int ret = ::send(stream->sock, reinterpret_cast<const char*>(item.second.data()),
-                                   static_cast<int>(item.second.size()), 0);
-#else
-            const int ret = static_cast<int>(::send(stream->sock, item.second.data(), item.second.size(), 0));
-#endif
-            if (ret <= 0) {
+            std::string error;
+            if (!send_all_raw(stream->sock, item.second.data(), item.second.size(), error)) {
+                PROXY_LOG(Debug, "[client] 本地下行发送失败 stream=" << stream_id << " error=" << error);
                 close_stream(stream_id, true);
             }
         } else if (type == FrameType::Close) {
@@ -861,7 +945,7 @@ void ClientRuntime::accept_one() {
 }
 
 void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream) {
-    std::array<std::uint8_t, 4096> buf{};
+    std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
 #ifdef _WIN32
     const int ret = ::recv(stream->sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
 #else
