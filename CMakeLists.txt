@@ -24,7 +24,7 @@ set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
 
 include(FetchContent)
 set(BORINGSSL_GIT_REPOSITORY "https://github.com/google/boringssl.git" CACHE STRING "BoringSSL Git repository")
-set(BORINGSSL_GIT_TAG "aa0acca1acf36b7fb16aa8a7b60b97d5cb01404d" CACHE STRING "Pinned BoringSSL commit to fetch")
+set(BORINGSSL_GIT_TAG "0.20260211.0" CACHE STRING "Pinned BoringSSL commit to fetch")
 set(BORINGSSL_ALLOW_CXX_RUNTIME ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     boringssl
