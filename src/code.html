@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI大模型聊天界面</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #0c0c1e, #1a1a3a);
+            color: #e0e0ff;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 900px;
+            height: 90vh;
+            background: rgba(15, 15, 35, 0.8);
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(80, 100, 255, 0.3);
+        }
+
+        /* 背景装饰 */
+        .container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #4e54c8, #8f94fb, #4e54c8);
+            animation: gradientMove 10s linear infinite;
+        }
+
+        @keyframes gradientMove {
+            0% { background-position: 0% 50%; }
+            100% { background-position: 100% 50%; }
+        }
+
+        /* 头部样式 */
+        .header {
+            padding: 20px;
+            background: rgba(10, 10, 25, 0.7);
+            border-bottom: 1px solid rgba(80, 100, 255, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: white;
+            box-shadow: 0 0 15px rgba(143, 148, 251, 0.5);
+        }
+
+        .logo-text {
+            font-size: 1.5rem;
+            font-weight: 600;
+            background: linear-gradient(90deg, #8f94fb, #4e54c8);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .model-info {
+            font-size: 0.9rem;
+            color: #8f94fb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            background: #4caf50;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #4caf50;
+        }
+
+        /* 聊天区域 */
+        .chat-container {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 15px 20px;
+            border-radius: 18px;
+            position: relative;
+            animation: fadeIn 0.3s ease-out;
+            line-height: 1.5;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .user-message {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            color: white;
+            border-bottom-right-radius: 5px;
+        }
+
+        .ai-message {
+            align-self: flex-start;
+            background: rgba(30, 30, 60, 0.8);
+            border: 1px solid rgba(80, 100, 255, 0.3);
+            border-bottom-left-radius: 5px;
+        }
+
+        .message-time {
+            font-size: 0.7rem;
+            opacity: 0.7;
+            margin-top: 8px;
+            text-align: right;
+        }
+
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 15px 20px;
+            background: rgba(30, 30, 60, 0.8);
+            border-radius: 18px;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+            border: 1px solid rgba(80, 100, 255, 0.3);
+        }
+
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            background: #8f94fb;
+            border-radius: 50%;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-8px); }
+        }
+
+        /* 输入区域 */
+        .input-area {
+            padding: 20px;
+            background: rgba(10, 10, 25, 0.7);
+            border-top: 1px solid rgba(80, 100, 255, 0.2);
+            display: flex;
+            gap: 15px;
+        }
+
+        .input-container {
+            flex: 1;
+            position: relative;
+        }
+
+        #user-input {
+            width: 100%;
+            padding: 15px 20px;
+            border-radius: 25px;
+            background: rgba(20, 20, 45, 0.8);
+            border: 1px solid rgba(80, 100, 255, 0.3);
+            color: #e0e0ff;
+            font-size: 1rem;
+            outline: none;
+            transition: all 0.3s;
+        }
+
+        #user-input:focus {
+            border-color: #8f94fb;
+            box-shadow: 0 0 15px rgba(143, 148, 251, 0.3);
+        }
+
+        #user-input::placeholder {
+            color: #8f94fb;
+            opacity: 0.6;
+        }
+
+        .send-button {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #4e54c8, #8f94fb);
+            border: none;
+            color: white;
+            font-size: 1.2rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(143, 148, 251, 0.4);
+        }
+
+        .send-button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 20px rgba(143, 148, 251, 0.6);
+        }
+
+        .send-button:active {
+            transform: scale(0.95);
+        }
+
+        /* 响应式调整 */
+        @media (max-width: 768px) {
+            .container {
+                height: 95vh;
+            }
+
+            .message {
+                max-width: 90%;
+            }
+
+            .header {
+                padding: 15px;
+            }
+
+            .logo-text {
+                font-size: 1.2rem;
+            }
+        }
+
+        /* 滚动条样式 */
+        .chat-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .chat-container::-webkit-scrollbar-track {
+            background: rgba(10, 10, 25, 0.5);
+        }
+
+        .chat-container::-webkit-scrollbar-thumb {
+            background: rgba(143, 148, 251, 0.5);
+            border-radius: 3px;
+        }
+
+        .chat-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(143, 148, 251, 0.8);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <i class="fas fa-brain"></i>
+                </div>
+                <div class="logo-text">MiMo AI</div>
+            </div>
+            <div class="model-info">
+                <div class="status-dot"></div>
+                <span>小米大模型Core团队开发</span>
+            </div>
+        </div>
+
+        <div class="chat-container" id="chat-container">
+            <div class="message ai-message">
+                你好！我是MiMo，小米公司大模型Core团队研发的AI智能助手。有什么我可以帮助你的吗？
+                <div class="message-time">刚刚</div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-container">
+                <input type="text" id="user-input" placeholder="输入你的问题..." autocomplete="off">
+            </div>
+            <button class="send-button" id="send-button">
+                <i class="fas fa-paper-plane"></i>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const chatContainer = document.getElementById('chat-container');
+            const userInput = document.getElementById('user-input');
+            const sendButton = document.getElementById('send-button');
+
+            // 添加消息到聊天容器
+            function addMessage(text, isUser = false) {
+                const messageDiv = document.createElement('div');
+                messageDiv.classList.add('message');
+                messageDiv.classList.add(isUser ? 'user-message' : 'ai-message');
+
+                const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                messageDiv.innerHTML = `
+                    ${text}
+                    <div class="message-time">${time}</div>
+                `;
+
+                chatContainer.appendChild(messageDiv);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+
+            // 显示打字指示器
+            function showTypingIndicator() {
+                const typingDiv = document.createElement('div');
+                typingDiv.classList.add('typing-indicator');
+                typingDiv.id = 'typing-indicator';
+
+                for (let i = 0; i < 3; i++) {
+                    const dot = document.createElement('div');
+                    dot.classList.add('typing-dot');
+                    typingDiv.appendChild(dot);
+                }
+
+                chatContainer.appendChild(typingDiv);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+
+            // 隐藏打字指示器
+            function hideTypingIndicator() {
+                const typingIndicator = document.getElementById('typing-indicator');
+                if (typingIndicator) {
+                    typingIndicator.remove();
+                }
+            }
+
+            // 模拟AI回复
+            function simulateAIResponse(userMessage) {
+                showTypingIndicator();
+
+                // 模拟思考时间（1-2秒）
+                const delay = 1000 + Math.random() * 1000;
+
+                setTimeout(() => {
+                    hideTypingIndicator();
+
+                    let aiResponse = "";
+
+                    // 根据用户输入生成不同的回复
+                    const lowerMessage = userMessage.toLowerCase();
+
+                    if (lowerMessage.includes("你好") || lowerMessage.includes("hi") || lowerMessage.includes("hello")) {
+                        aiResponse = "你好！很高兴见到你。有什么我可以帮助你的吗？";
+                    } else if (lowerMessage.includes("天气")) {
+                        aiResponse = "我目前无法获取实时天气数据，但你可以告诉我你所在的城市，我可以为你提供一些天气相关的建议。";
+                    } else if (lowerMessage.includes("时间")) {
+                        const now = new Date();
+                        aiResponse = `现在时间是 ${now.toLocaleTimeString()}。`;
+                    } else if (lowerMessage.includes("名字")) {
+                        aiResponse = "我是MiMo，由小米公司大模型Core团队研发的AI助手。很高兴认识你！";
+                    } else if (lowerMessage.includes("帮助")) {
+                        aiResponse = "我可以帮助你解答各种问题，比如科技、生活、学习等方面。你可以尝试问我关于编程、数学、历史或其他任何你感兴趣的话题。";
+                    } else if (lowerMessage.includes("谢谢")) {
+                        aiResponse = "不客气！如果还有其他问题，随时问我哦！";
+                    } else {
+                        // 随机回复一些通用内容
+                        const responses = [
+                            "这是一个很有趣的问题！让我思考一下...",
+                            "根据我的理解，我认为...",
+                            "这是一个很好的问题！我的看法是...",
+                            "我明白你的意思了。让我分享一下我的观点...",
+                            "关于这个问题，我有以下几点想法..."
+                        ];
+                        aiResponse = responses[Math.floor(Math.random() * responses.length)] + " " + userMessage;
+                    }
+
+                    addMessage(aiResponse);
+                }, delay);
+            }
+
+            // 发送消息
+            function sendMessage() {
+                const message = userInput.value.trim();
+                if (message) {
+                    addMessage(message, true);
+                    userInput.value = '';
+
+                    // 模拟AI回复
+                    setTimeout(() => simulateAIResponse(message), 500);
+                }
+            }
+
+            // 事件监听
+            sendButton.addEventListener('click', sendMessage);
+
+            userInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    sendMessage();
+                }
+            });
+
+            // 初始聚焦到输入框
+            userInput.focus();
+        });
+    </script>
+</body>
+</html>

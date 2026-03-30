@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <exception>
 #include <string>
 #include <thread>
 #include <vector>
@@ -125,6 +126,23 @@ bool parse_host_port(const std::string& text, std::string& host, std::uint16_t& 
     return !host.empty();
 }
 
+std::string describe_socks5_target(const Socks5Request& req) {
+    return req.host + ":" + std::to_string(req.port);
+}
+
+const char* socks5_atyp_name(std::uint8_t atyp) {
+    switch (atyp) {
+        case 0x01:
+            return "ipv4";
+        case 0x03:
+            return "domain";
+        case 0x04:
+            return "ipv6";
+        default:
+            return "unknown";
+    }
+}
+
 class ClientRuntime {
 public:
     explicit ClientRuntime(ClientConfig cfg) : cfg_(std::move(cfg)) {}
@@ -186,6 +204,7 @@ private:
     void close_all_streams();
     void process_request_queue();
     bool flush_session();
+    bool is_stream_active(std::uint32_t id);
 
     static socket_t make_listener(std::uint16_t port);
     static nghttp2_ssize read_request_body(nghttp2_session* session, int32_t stream_id, uint8_t* buf,
@@ -431,12 +450,18 @@ bool ClientRuntime::start() {
     }
     PROXY_LOG(Info, "[client] SOCKS5 监听 127.0.0.1:" << cfg_.listen_port);
     accept_and_pump_loop();
-    return true;
+    if (!io_error_.empty()) {
+        PROXY_LOG(Error, "[client] 客户端停止: " << io_error_);
+        return false;
+    }
+    return running_;
 }
 
 void ClientRuntime::io_loop() {
+    try {
     nghttp2_session_callbacks* callbacks = nullptr;
     const auto finish_with_error = [&](const std::string& error) {
+        PROXY_LOG(Error, "[client] IO 线程退出: " << error);
         io_error_ = error;
         io_ok_ = false;
         io_ready_ = true;
@@ -527,6 +552,10 @@ void ClientRuntime::io_loop() {
         }
     }
 
+    if (!io_error_.empty()) {
+        PROXY_LOG(Warn, "[client] HTTP/2 会话结束: " << io_error_);
+    }
+
     std::lock_guard<std::mutex> lock(requests_mutex_);
     for (auto& item : active_requests_) {
         std::lock_guard<std::mutex> req_lock(item.second->mutex);
@@ -545,6 +574,19 @@ void ClientRuntime::io_loop() {
         req->success = false;
         req->error = io_error_.empty() ? "HTTP/2 会话已结束" : io_error_;
         req->cv.notify_all();
+    }
+    } catch (const std::exception& ex) {
+        io_error_ = std::string("io_loop 未捕获异常: ") + ex.what();
+        PROXY_LOG(Error, "[client] " << io_error_);
+        io_ok_ = false;
+        io_ready_ = true;
+        running_ = false;
+    } catch (...) {
+        io_error_ = "io_loop 未捕获未知异常";
+        PROXY_LOG(Error, "[client] " << io_error_);
+        io_ok_ = false;
+        io_ready_ = true;
+        running_ = false;
     }
 }
 
@@ -680,8 +722,14 @@ int ClientRuntime::on_header(nghttp2_session* /*session*/, const nghttp2_frame* 
 
     const std::string header_name(reinterpret_cast<const char*>(name), namelen);
     if (header_name == ":status") {
-        request->status = std::stoi(std::string(reinterpret_cast<const char*>(value), valuelen));
-        PROXY_LOG(Debug, "[client] stream " << frame->hd.stream_id << " HTTP status " << request->status);
+        try {
+            request->status = std::stoi(std::string(reinterpret_cast<const char*>(value), valuelen));
+            PROXY_LOG(Debug, "[client] stream " << frame->hd.stream_id << " HTTP status " << request->status);
+        } catch (const std::exception& ex) {
+            PROXY_LOG(Error, "[client] 解析 HTTP 状态码失败 stream="
+                                 << frame->hd.stream_id << " error=" << ex.what());
+            request->status = 0;
+        }
     }
     return 0;
 }
@@ -827,6 +875,7 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
             if (!stream) {
                 continue;
             }
+            PROXY_LOG(Info, "[client] 收到 OpenOk stream=" << stream_id);
             {
                 std::lock_guard<std::mutex> lock(stream->mutex);
                 stream->state = LocalStream::State::Open;
@@ -838,6 +887,7 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
             }
             std::string reason;
             decode_open_fail(item.second, reason);
+            PROXY_LOG(Warn, "[client] 收到 OpenFail stream=" << stream_id << " reason=" << reason);
             {
                 std::lock_guard<std::mutex> lock(stream->mutex);
                 stream->state = LocalStream::State::Failed;
@@ -848,8 +898,19 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
             if (!stream) {
                 continue;
             }
+            socket_t sock = kInvalidSocket;
+            {
+                std::lock_guard<std::mutex> lock(stream->mutex);
+                if (stream->state != LocalStream::State::Open) {
+                    continue;
+                }
+                sock = stream->sock;
+            }
+            if (sock == kInvalidSocket) {
+                continue;
+            }
             std::string error;
-            if (!send_all_raw(stream->sock, item.second.data(), item.second.size(), error)) {
+            if (!send_all_raw(sock, item.second.data(), item.second.size(), error)) {
                 PROXY_LOG(Debug, "[client] 本地下行发送失败 stream=" << stream_id << " error=" << error);
                 close_stream(stream_id, true);
             }
@@ -860,6 +921,7 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
 }
 
 void ClientRuntime::accept_and_pump_loop() {
+    try {
     while (running_) {
         fd_set readfds;
         FD_ZERO(&readfds);
@@ -874,9 +936,17 @@ void ClientRuntime::accept_and_pump_loop() {
             }
         }
         for (const auto& stream : snapshot) {
-            FD_SET(stream->sock, &readfds);
-            if (stream->sock > maxfd) {
-                maxfd = stream->sock;
+            socket_t sock = kInvalidSocket;
+            {
+                std::lock_guard<std::mutex> lock(stream->mutex);
+                if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
+                    continue;
+                }
+                sock = stream->sock;
+            }
+            FD_SET(sock, &readfds);
+            if (sock > maxfd) {
+                maxfd = sock;
             }
         }
 
@@ -890,10 +960,29 @@ void ClientRuntime::accept_and_pump_loop() {
             accept_one();
         }
         for (const auto& stream : snapshot) {
-            if (FD_ISSET(stream->sock, &readfds)) {
+            socket_t sock = kInvalidSocket;
+            {
+                std::lock_guard<std::mutex> lock(stream->mutex);
+                if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
+                    continue;
+                }
+                sock = stream->sock;
+            }
+            if (FD_ISSET(sock, &readfds) && is_stream_active(stream->id)) {
                 pump_local_socket(stream);
             }
         }
+    }
+    PROXY_LOG(Warn, "[client] 本地转发循环结束"
+                         << (io_error_.empty() ? "" : " reason=" + io_error_));
+    } catch (const std::exception& ex) {
+        io_error_ = std::string("accept_and_pump_loop 未捕获异常: ") + ex.what();
+        PROXY_LOG(Error, "[client] " << io_error_);
+        running_ = false;
+    } catch (...) {
+        io_error_ = "accept_and_pump_loop 未捕获未知异常";
+        PROXY_LOG(Error, "[client] " << io_error_);
+        running_ = false;
     }
 }
 
@@ -924,7 +1013,12 @@ void ClientRuntime::accept_one() {
         streams_[stream->id] = stream;
     }
 
+    PROXY_LOG(Info, "[client] 新建本地连接 stream=" << stream->id
+                                                     << " target=" << describe_socks5_target(req)
+                                                     << " atyp=" << socks5_atyp_name(req.atyp));
+
     queue_frame(FrameType::Open, stream->id, encode_open_request(req));
+    bool open_succeeded = false;
     {
         std::unique_lock<std::mutex> lock(stream->mutex);
         stream->cv.wait(lock, [&] {
@@ -932,24 +1026,42 @@ void ClientRuntime::accept_one() {
                    stream->state == LocalStream::State::Failed ||
                    !running_;
         });
-        if (stream->state != LocalStream::State::Open) {
-            send_socks5_reply(sock, 0x05);
-            close_stream(stream->id, false);
-            return;
-        }
+        open_succeeded = stream->state == LocalStream::State::Open;
     }
 
+    if (!open_succeeded) {
+        PROXY_LOG(Warn, "[client] 打开远端流失败 stream=" << stream->id
+                                                           << " target=" << describe_socks5_target(req)
+                                                           << (stream->error.empty() ? "" : " error=" + stream->error));
+        if (stream->state == LocalStream::State::Failed) {
+            send_socks5_reply(sock, 0x05);
+        }
+        close_stream(stream->id, false);
+        return;
+    }
+
+    PROXY_LOG(Info, "[client] 远端流已打开 stream=" << stream->id
+                                                   << " target=" << describe_socks5_target(req));
     if (!send_socks5_reply(sock, 0x00)) {
         close_stream(stream->id, true);
     }
 }
 
 void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream) {
+    socket_t sock = kInvalidSocket;
+    {
+        std::lock_guard<std::mutex> lock(stream->mutex);
+        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
+            return;
+        }
+        sock = stream->sock;
+    }
+
     std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
 #ifdef _WIN32
-    const int ret = ::recv(stream->sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
+    const int ret = ::recv(sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
 #else
-    const int ret = static_cast<int>(::recv(stream->sock, buf.data(), buf.size(), 0));
+    const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
 #endif
     if (ret <= 0) {
         close_stream(stream->id, true);
@@ -961,6 +1073,7 @@ void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream
 
 void ClientRuntime::close_stream(std::uint32_t id, bool notify_remote) {
     std::shared_ptr<LocalStream> stream;
+    socket_t sock = kInvalidSocket;
     {
         std::lock_guard<std::mutex> lock(streams_mutex_);
         const auto it = streams_.find(id);
@@ -971,13 +1084,21 @@ void ClientRuntime::close_stream(std::uint32_t id, bool notify_remote) {
         streams_.erase(it);
     }
     if (notify_remote && running_) {
+        PROXY_LOG(Debug, "[client] 关闭本地流并通知远端 stream=" << id);
         queue_frame(FrameType::Close, id, {});
+    } else {
+        PROXY_LOG(Debug, "[client] 关闭本地流 stream=" << id);
     }
-    close_socket(stream->sock);
     {
         std::lock_guard<std::mutex> lock(stream->mutex);
+        if (stream->state == LocalStream::State::Closed) {
+            return;
+        }
+        sock = stream->sock;
+        stream->sock = kInvalidSocket;
         stream->state = LocalStream::State::Closed;
     }
+    close_socket(sock);
     stream->cv.notify_all();
 }
 
@@ -988,11 +1109,19 @@ void ClientRuntime::close_all_streams() {
         current.swap(streams_);
     }
     for (auto& kv : current) {
-        close_socket(kv.second->sock);
+        socket_t sock = kInvalidSocket;
         std::lock_guard<std::mutex> lock(kv.second->mutex);
+        sock = kv.second->sock;
+        kv.second->sock = kInvalidSocket;
         kv.second->state = LocalStream::State::Closed;
         kv.second->cv.notify_all();
+        close_socket(sock);
     }
+}
+
+bool ClientRuntime::is_stream_active(std::uint32_t id) {
+    std::lock_guard<std::mutex> lock(streams_mutex_);
+    return streams_.find(id) != streams_.end();
 }
 
 socket_t ClientRuntime::make_listener(std::uint16_t port) {
@@ -1067,6 +1196,7 @@ void print_usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    try {
 #ifdef _WIN32
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -1097,7 +1227,16 @@ int main(int argc, char** argv) {
 
     ClientRuntime runtime(cfg);
     if (!runtime.start()) {
+        PROXY_LOG(Error, "[client] runtime.start() 返回失败");
         return 1;
     }
+    PROXY_LOG(Info, "[client] runtime.start() 正常结束");
     return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << "[client] main 未捕获异常: " << ex.what() << "\n";
+        return 1;
+    } catch (...) {
+        std::cerr << "[client] main 未捕获未知异常\n";
+        return 1;
+    }
 }

@@ -2,6 +2,7 @@
 #include "common/socks5.h"
 #include "common/tls_wrapper.h"
 #include "common/tunnel_protocol.h"
+#include "homepage_html.h"
 
 #define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>
@@ -256,14 +257,33 @@ bool open_upstream_channel(const ServerConfig& config, std::uint8_t requested_at
     return true;
 }
 
+std::string describe_upstream_route(const ServerConfig& config, const std::string& requested_host,
+                                    std::uint16_t requested_port) {
+    if (!config.has_fixed_target || config.target_type == ServerConfig::TargetType::Direct) {
+        return requested_host + ":" + std::to_string(requested_port) + " (direct)";
+    }
+    if (config.target_type == ServerConfig::TargetType::Raw) {
+        return config.fixed_host + ":" + std::to_string(config.fixed_port) + " (raw fixed)";
+    }
+    return config.fixed_host + ":" + std::to_string(config.fixed_port) + " (socks5 for " +
+           requested_host + ":" + std::to_string(requested_port) + ")";
+}
+
+const char* socks5_atyp_name(std::uint8_t atyp) {
+    switch (atyp) {
+        case 0x01:
+            return "ipv4";
+        case 0x03:
+            return "domain";
+        case 0x04:
+            return "ipv6";
+        default:
+            return "unknown";
+    }
+}
+
 std::string homepage_html() {
-    return "<!doctype html><html><head><meta charset='utf-8'><title>qtunnel</title>"
-           "<style>body{font-family:Georgia,serif;max-width:760px;margin:64px auto;padding:0 16px;"
-           "line-height:1.7;background:#f6f1e8;color:#1f2933}main{background:#fff;padding:32px;"
-           "border-radius:18px;box-shadow:0 10px 30px rgba(31,41,51,.08)}h1{margin-top:0}</style>"
-           "</head><body><main><h1>qtunnel</h1><p>This endpoint hosts a private HTTP/2 tunnel service.</p>"
-           "<p>The public homepage is intentionally simple, while data transport is handled by the "
-           "<code>/api/tunnel/*</code> endpoints.</p></main></body></html>";
+    return generated::kHomepageHtml;
 }
 
 struct Http1Request {
@@ -595,6 +615,8 @@ void Http2ServerConnection::close_logical_stream(std::uint32_t stream_id, bool n
     if (it == streams_.end()) {
         return;
     }
+    PROXY_LOG(Debug, "[server] 关闭上游流 stream=" << stream_id
+                                                   << (notify_client ? " notify_client=yes" : " notify_client=no"));
     close_socket(it->second.sock);
     streams_.erase(it);
     if (notify_client) {
@@ -731,22 +753,37 @@ void Http2ServerConnection::handle_upload_frames(RequestState& request) {
             std::string requested_host;
             std::uint16_t requested_port = 0;
             if (!decode_open_request(item.second, atyp, requested_host, requested_port)) {
+                PROXY_LOG(Warn, "[server] Open 请求解析失败 stream=" << tunnel_stream_id);
                 enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail("bad open request"));
                 continue;
             }
 
+            PROXY_LOG(Info, "[server] Open 请求 stream=" << tunnel_stream_id
+                                                         << " requested=" << requested_host << ":" << requested_port
+                                                         << " atyp=" << socks5_atyp_name(atyp)
+                                                         << " route="
+                                                         << describe_upstream_route(config_, requested_host,
+                                                                                    requested_port));
+
             std::string error;
             socket_t upstream = kInvalidSocket;
             if (!open_upstream_channel(config_, atyp, requested_host, requested_port, upstream, error)) {
+                PROXY_LOG(Warn, "[server] Open 失败 stream=" << tunnel_stream_id
+                                                             << " requested=" << requested_host << ":" << requested_port
+                                                             << " error=" << error);
                 enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail(error));
                 continue;
             }
 
             streams_[tunnel_stream_id] = UpstreamStream{tunnel_stream_id, upstream};
+            PROXY_LOG(Info, "[server] Open 成功 stream=" << tunnel_stream_id
+                                                         << " requested=" << requested_host << ":" << requested_port);
             enqueue_downlink(FrameType::OpenOk, tunnel_stream_id, encode_open_ok());
         } else if (type == FrameType::Data) {
             const auto stream_it = streams_.find(tunnel_stream_id);
             if (stream_it == streams_.end()) {
+                PROXY_LOG(Debug, "[server] 丢弃未知流数据 stream=" << tunnel_stream_id
+                                                                  << " bytes=" << item.second.size());
                 continue;
             }
             std::string error;
@@ -755,6 +792,7 @@ void Http2ServerConnection::handle_upload_frames(RequestState& request) {
                 close_logical_stream(tunnel_stream_id, true);
             }
         } else if (type == FrameType::Close) {
+            PROXY_LOG(Debug, "[server] 收到客户端 Close stream=" << tunnel_stream_id);
             close_logical_stream(tunnel_stream_id, false);
         } else if (type == FrameType::Ping) {
             enqueue_downlink(FrameType::Pong, 0, item.second);

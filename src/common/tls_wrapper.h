@@ -265,11 +265,26 @@ inline bool wait_socket_writable(socket_t sock, int timeout_ms, std::string& err
     return true;
 }
 
+inline bool is_ip_literal_host(const std::string& host) {
+    in_addr ipv4{};
+    if (::inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
+        return true;
+    }
+    in6_addr ipv6{};
+    return ::inet_pton(AF_INET6, host.c_str(), &ipv6) == 1;
+}
+
 inline socket_t connect_tcp(const std::string& host, std::uint16_t port, std::string& error,
                             int timeout_ms = 8000) {
     addrinfo hints{};
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_family = AF_UNSPEC;
+    const bool host_is_ip_literal = is_ip_literal_host(host);
+    if (!host_is_ip_literal) {
+#ifdef AI_ADDRCONFIG
+        hints.ai_flags |= AI_ADDRCONFIG;
+#endif
+    }
 
     addrinfo* res = nullptr;
     const std::string port_text = std::to_string(port);
@@ -285,7 +300,25 @@ inline socket_t connect_tcp(const std::string& host, std::uint16_t port, std::st
 
     socket_t sock = kInvalidSocket;
     std::string last_connect_error;
+    std::vector<addrinfo*> candidates;
     for (auto* p = res; p != nullptr; p = p->ai_next) {
+        candidates.push_back(p);
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const addrinfo* lhs, const addrinfo* rhs) {
+        const auto rank = [](int family) {
+            if (family == AF_INET) {
+                return 0;
+            }
+            if (family == AF_INET6) {
+                return 1;
+            }
+            return 2;
+        };
+        return rank(lhs->ai_family) < rank(rhs->ai_family);
+    });
+
+    const int per_attempt_timeout_ms = host_is_ip_literal ? timeout_ms : std::min(timeout_ms, 2500);
+    for (auto* p : candidates) {
         sock = static_cast<socket_t>(::socket(p->ai_family, p->ai_socktype, p->ai_protocol));
         if (sock == kInvalidSocket) {
             continue;
@@ -313,7 +346,7 @@ inline socket_t connect_tcp(const std::string& host, std::uint16_t port, std::st
         const bool pending = connect_error == EINPROGRESS;
 #endif
 
-        if (pending && wait_socket_writable(sock, timeout_ms, last_connect_error)) {
+        if (pending && wait_socket_writable(sock, per_attempt_timeout_ms, last_connect_error)) {
             set_socket_nonblocking(sock, false, nonblocking_error);
             break;
         }

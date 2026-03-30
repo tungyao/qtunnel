@@ -11,6 +11,7 @@ else()
 endif()
 
 set(COMMON_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(GENERATED_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 set(ENABLE_LIB_ONLY ON CACHE BOOL "" FORCE)
 set(ENABLE_APP OFF CACHE BOOL "" FORCE)
@@ -43,10 +44,28 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nghttp2)
 
+set(HOMEPAGE_HTML_INPUT ${CMAKE_CURRENT_SOURCE_DIR}/src/code.html)
+set(HOMEPAGE_HTML_HEADER ${GENERATED_INCLUDE_DIR}/homepage_html.h)
+
+add_custom_command(
+    OUTPUT ${HOMEPAGE_HTML_HEADER}
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT_FILE=${HOMEPAGE_HTML_INPUT}
+            -DOUTPUT_FILE=${HOMEPAGE_HTML_HEADER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_homepage_header.cmake
+    DEPENDS ${HOMEPAGE_HTML_INPUT} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_homepage_header.cmake
+    COMMENT "Generating homepage_html.h from code.html"
+    VERBATIM
+)
+
+add_custom_target(generate_homepage_header DEPENDS ${HOMEPAGE_HTML_HEADER})
+
 add_executable(server
     src/server.cpp
+    ${HOMEPAGE_HTML_HEADER}
 )
-target_include_directories(server PRIVATE ${COMMON_INCLUDE_DIR})
+add_dependencies(server generate_homepage_header)
+target_include_directories(server PRIVATE ${COMMON_INCLUDE_DIR} ${GENERATED_INCLUDE_DIR})
 
 add_executable(client
     src/client.cpp
