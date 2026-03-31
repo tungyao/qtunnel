@@ -40,6 +40,7 @@ constexpr std::size_t kTunnelIoChunkSize = 64 * 1024;
 constexpr long kTunnelPollIntervalUsec = 5000;
 constexpr std::int32_t kHttp2WindowSize = 1 * 1024 * 1024;
 constexpr std::uint32_t kHttp2MaxFrameSize = 256 * 1024;
+constexpr std::size_t kMaxBufferedDownlinkBytes = 8 * 1024 * 1024;
 
 using proxy::close_socket;
 using proxy::consume_frames;
@@ -177,6 +178,14 @@ std::string trim_ascii(std::string text) {
     return std::string(begin, end);
 }
 
+bool is_socket_would_block(int code) {
+#ifdef _WIN32
+    return code == WSAEWOULDBLOCK;
+#else
+    return code == EAGAIN || code == EWOULDBLOCK;
+#endif
+}
+
 std::uint8_t detect_atyp_from_host(const std::string& host) {
     in_addr ipv4{};
     if (::inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
@@ -189,15 +198,16 @@ std::uint8_t detect_atyp_from_host(const std::string& host) {
     return 0x03;
 }
 
-bool recv_http_headers(socket_t sock, std::string& raw_request, std::string& error) {
+bool recv_http_headers(socket_t sock, std::string& raw_request, std::size_t& header_end, std::string& error) {
     raw_request.clear();
+    header_end = std::string::npos;
     constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
-    char ch = '\0';
+    std::array<char, 4096> buf{};
     while (raw_request.size() < kMaxHeaderBytes) {
 #ifdef _WIN32
-        const int ret = ::recv(sock, &ch, 1, 0);
+        const int ret = ::recv(sock, buf.data(), static_cast<int>(buf.size()), 0);
 #else
-        const int ret = static_cast<int>(::recv(sock, &ch, 1, 0));
+        const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
 #endif
         if (ret == 0) {
             error = "HTTP 客户端已断开";
@@ -207,9 +217,9 @@ bool recv_http_headers(socket_t sock, std::string& raw_request, std::string& err
             error = "读取 HTTP 请求头失败";
             return false;
         }
-        raw_request.push_back(ch);
-        if (raw_request.size() >= 4 &&
-            raw_request.compare(raw_request.size() - 4, 4, "\r\n\r\n") == 0) {
+        raw_request.append(buf.data(), static_cast<std::size_t>(ret));
+        header_end = raw_request.find("\r\n\r\n");
+        if (header_end != std::string::npos) {
             return true;
         }
     }
@@ -220,11 +230,11 @@ bool recv_http_headers(socket_t sock, std::string& raw_request, std::string& err
 
 bool parse_http_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std::string& error) {
     std::string raw_request;
-    if (!recv_http_headers(sock, raw_request, error)) {
+    std::size_t header_end = std::string::npos;
+    if (!recv_http_headers(sock, raw_request, header_end, error)) {
         return false;
     }
 
-    const auto header_end = raw_request.find("\r\n\r\n");
     if (header_end == std::string::npos) {
         error = "HTTP 请求头不完整";
         return false;
@@ -355,6 +365,12 @@ bool parse_http_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std
     accepted.protocol = LocalProxyProtocol::HttpForward;
     const std::string rebuilt_request = rebuilt.str();
     accepted.initial_payload.assign(rebuilt_request.begin(), rebuilt_request.end());
+    const std::size_t body_offset = header_end + 4;
+    if (body_offset < raw_request.size()) {
+        accepted.initial_payload.insert(accepted.initial_payload.end(),
+                                        raw_request.begin() + static_cast<std::ptrdiff_t>(body_offset),
+                                        raw_request.end());
+    }
     return true;
 }
 
@@ -399,6 +415,7 @@ bool accept_local_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, s
     }
 
     if (std::isalpha(first_byte) != 0) {
+        accepted.protocol = LocalProxyProtocol::HttpForward;
         return parse_http_proxy_request(sock, accepted, error);
     }
 
@@ -408,10 +425,13 @@ bool accept_local_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, s
 
 class ClientRuntime {
 public:
-    explicit ClientRuntime(ClientConfig cfg) : cfg_(std::move(cfg)) {}
+    ClientRuntime(ClientConfig cfg, socket_t listener) : cfg_(std::move(cfg)), listener_(listener) {}
     ~ClientRuntime();
 
     bool start();
+    bool should_retry() const { return should_retry_; }
+    const std::string& last_error() const { return io_error_; }
+    static socket_t make_listener(std::uint16_t port);
 
 private:
     struct LocalStream {
@@ -419,6 +439,8 @@ private:
         socket_t sock = kInvalidSocket;
         enum class State { Pending, Open, Failed, Closed } state = State::Pending;
         std::string error;
+        std::vector<std::uint8_t> pending_downlink;
+        std::size_t pending_downlink_offset = 0;
         std::mutex mutex;
         std::condition_variable cv;
     };
@@ -461,6 +483,7 @@ private:
     void accept_and_pump_loop();
     void accept_one();
     void pump_local_socket(const std::shared_ptr<LocalStream>& stream);
+    bool flush_local_socket(const std::shared_ptr<LocalStream>& stream, std::string& error);
     void queue_frame(FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload);
     void dispatch_downlink(const std::vector<std::uint8_t>& body);
     void close_stream(std::uint32_t id, bool notify_remote);
@@ -469,7 +492,6 @@ private:
     bool flush_session();
     bool is_stream_active(std::uint32_t id);
 
-    static socket_t make_listener(std::uint16_t port);
     static nghttp2_ssize read_request_body(nghttp2_session* session, int32_t stream_id, uint8_t* buf,
                                            size_t length, uint32_t* data_flags, nghttp2_data_source* source,
                                            void* user_data);
@@ -496,6 +518,7 @@ private:
     std::atomic<bool> io_ok_{false};
     std::string io_error_;
     std::string peer_fingerprint_;
+    bool should_retry_ = false;
 
     std::mutex requests_mutex_;
     std::deque<std::shared_ptr<RequestState>> pending_requests_;
@@ -525,9 +548,6 @@ ClientRuntime::~ClientRuntime() {
         int ignored_status = 0;
         submit_request_sync("POST", "/api/tunnel/close", {}, "text/plain",
                             RequestState::WaitMode::UntilStreamClose, false, &ignored_status);
-    }
-    if (listener_ != kInvalidSocket) {
-        close_socket(listener_);
     }
     tls_.shutdown();
     if (io_thread_.joinable()) {
@@ -651,7 +671,12 @@ bool ClientRuntime::start_upload_stream() {
 }
 
 bool ClientRuntime::start() {
+    should_retry_ = false;
     running_ = true;
+    if (listener_ == kInvalidSocket) {
+        io_error_ = "本地监听未初始化";
+        return false;
+    }
     PROXY_LOG(Info, "[client] 正在连接 " << cfg_.server_host << ":" << cfg_.server_port << " ...");
     io_thread_ = std::thread(&ClientRuntime::io_loop, this);
     if (!wait_for_io_ready()) {
@@ -690,13 +715,6 @@ bool ClientRuntime::start() {
         return false;
     }
 
-    listener_ = make_listener(cfg_.listen_port);
-    if (listener_ == kInvalidSocket) {
-        PROXY_LOG(Error, "[client] 本地监听失败");
-        running_ = false;
-        return false;
-    }
-
     PROXY_LOG(Info, "[client] 正在建立上行 upload stream ...");
     if (!start_upload_stream()) {
         PROXY_LOG(Error, "[client] 启动 upload stream 失败: " << io_error_);
@@ -712,6 +730,7 @@ bool ClientRuntime::start() {
         PROXY_LOG(Debug, "[client] 服务器证书 SHA-256 指纹: " << peer_fingerprint_);
     }
     PROXY_LOG(Info, "[client] 本地代理监听 127.0.0.1:" << cfg_.listen_port << " (SOCKS5 + HTTP)");
+    should_retry_ = true;
     accept_and_pump_loop();
     if (!io_error_.empty()) {
         PROXY_LOG(Error, "[client] 客户端停止: " << io_error_);
@@ -1136,6 +1155,7 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
 
         if (type == FrameType::OpenOk) {
             if (!stream) {
+                PROXY_LOG(Debug, "[client] 收到 OpenOk，但本地流不存在 stream=" << stream_id);
                 continue;
             }
             PROXY_LOG(Info, "[client] 收到 OpenOk stream=" << stream_id);
@@ -1159,25 +1179,31 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
             stream->cv.notify_all();
         } else if (type == FrameType::Data) {
             if (!stream) {
+                PROXY_LOG(Debug, "[client] 丢弃未知流下行数据 stream=" << stream_id
+                                                                      << " bytes=" << item.second.size());
                 continue;
             }
-            socket_t sock = kInvalidSocket;
+            bool buffered_too_much = false;
+            std::size_t buffered_bytes = 0;
             {
                 std::lock_guard<std::mutex> lock(stream->mutex);
-                if (stream->state != LocalStream::State::Open) {
+                if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
                     continue;
                 }
-                sock = stream->sock;
+                stream->pending_downlink.insert(stream->pending_downlink.end(), item.second.begin(), item.second.end());
+                buffered_bytes = stream->pending_downlink.size() - stream->pending_downlink_offset;
+                buffered_too_much = buffered_bytes > kMaxBufferedDownlinkBytes;
             }
-            if (sock == kInvalidSocket) {
-                continue;
-            }
-            std::string error;
-            if (!send_all_raw(sock, item.second.data(), item.second.size(), error)) {
-                PROXY_LOG(Debug, "[client] 本地下行发送失败 stream=" << stream_id << " error=" << error);
+            PROXY_LOG(Debug, "[client] 收到下行数据 stream=" << stream_id
+                                                            << " bytes=" << item.second.size()
+                                                            << " buffered=" << buffered_bytes);
+            if (buffered_too_much) {
+                PROXY_LOG(Debug, "[client] 本地下行缓冲过大，关闭流 stream=" << stream_id
+                                                                    << " buffered=" << buffered_bytes);
                 close_stream(stream_id, true);
             }
         } else if (type == FrameType::Close) {
+            PROXY_LOG(Debug, "[client] 收到远端 Close stream=" << stream_id);
             close_stream(stream_id, false);
         }
     }
@@ -1187,7 +1213,9 @@ void ClientRuntime::accept_and_pump_loop() {
     try {
     while (running_) {
         fd_set readfds;
+        fd_set writefds;
         FD_ZERO(&readfds);
+        FD_ZERO(&writefds);
         FD_SET(listener_, &readfds);
         socket_t maxfd = listener_;
 
@@ -1200,14 +1228,19 @@ void ClientRuntime::accept_and_pump_loop() {
         }
         for (const auto& stream : snapshot) {
             socket_t sock = kInvalidSocket;
+            bool wants_write = false;
             {
                 std::lock_guard<std::mutex> lock(stream->mutex);
                 if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
                     continue;
                 }
                 sock = stream->sock;
+                wants_write = stream->pending_downlink_offset < stream->pending_downlink.size();
             }
             FD_SET(sock, &readfds);
+            if (wants_write) {
+                FD_SET(sock, &writefds);
+            }
             if (sock > maxfd) {
                 maxfd = sock;
             }
@@ -1215,7 +1248,7 @@ void ClientRuntime::accept_and_pump_loop() {
 
         timeval tv{};
         tv.tv_sec = 1;
-        const int ready = ::select(static_cast<int>(maxfd + 1), &readfds, nullptr, nullptr, &tv);
+        const int ready = ::select(static_cast<int>(maxfd + 1), &readfds, &writefds, nullptr, &tv);
         if (ready < 0) {
             continue;
         }
@@ -1230,6 +1263,14 @@ void ClientRuntime::accept_and_pump_loop() {
                     continue;
                 }
                 sock = stream->sock;
+            }
+            if (FD_ISSET(sock, &writefds) && is_stream_active(stream->id)) {
+                std::string error;
+                if (!flush_local_socket(stream, error)) {
+                    PROXY_LOG(Debug, "[client] 刷新本地下行失败 stream=" << stream->id << " error=" << error);
+                    close_stream(stream->id, true);
+                    continue;
+                }
             }
             if (FD_ISSET(sock, &readfds) && is_stream_active(stream->id)) {
                 pump_local_socket(stream);
@@ -1247,6 +1288,47 @@ void ClientRuntime::accept_and_pump_loop() {
         PROXY_LOG(Error, "[client] " << io_error_);
         running_ = false;
     }
+}
+
+bool ClientRuntime::flush_local_socket(const std::shared_ptr<LocalStream>& stream, std::string& error) {
+    std::lock_guard<std::mutex> lock(stream->mutex);
+    if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
+        return true;
+    }
+
+    while (stream->pending_downlink_offset < stream->pending_downlink.size()) {
+        const auto* data = stream->pending_downlink.data() + stream->pending_downlink_offset;
+        const std::size_t remaining = stream->pending_downlink.size() - stream->pending_downlink_offset;
+#ifdef _WIN32
+        const int ret = ::send(stream->sock, reinterpret_cast<const char*>(data), static_cast<int>(remaining), 0);
+#else
+        const int ret = static_cast<int>(::send(stream->sock, data, remaining, 0));
+#endif
+        if (ret > 0) {
+            stream->pending_downlink_offset += static_cast<std::size_t>(ret);
+            continue;
+        }
+
+        const int code = proxy::last_socket_error_code();
+        if (ret < 0 && is_socket_would_block(code)) {
+            break;
+        }
+
+        error = "socket send 失败: " + proxy::socket_error_string();
+        return false;
+    }
+
+    if (stream->pending_downlink_offset >= stream->pending_downlink.size()) {
+        stream->pending_downlink.clear();
+        stream->pending_downlink_offset = 0;
+    } else if (stream->pending_downlink_offset >= kTunnelIoChunkSize) {
+        stream->pending_downlink.erase(
+            stream->pending_downlink.begin(),
+            stream->pending_downlink.begin() + static_cast<std::ptrdiff_t>(stream->pending_downlink_offset));
+        stream->pending_downlink_offset = 0;
+    }
+
+    return true;
 }
 
 void ClientRuntime::accept_one() {
@@ -1288,6 +1370,7 @@ void ClientRuntime::accept_one() {
                                                                                                                : "http")));
 
     queue_frame(FrameType::Open, stream->id, encode_open_request(accepted.target));
+    PROXY_LOG(Debug, "[client] 已发送 Open 帧，等待远端确认 stream=" << stream->id);
     bool open_succeeded = false;
     {
         std::unique_lock<std::mutex> lock(stream->mutex);
@@ -1297,6 +1380,13 @@ void ClientRuntime::accept_one() {
                    !running_;
         });
         open_succeeded = stream->state == LocalStream::State::Open;
+        PROXY_LOG(Debug, "[client] 等待 Open 结束 stream=" << stream->id
+                                                            << " state="
+                                                            << (stream->state == LocalStream::State::Open ? "open" :
+                                                                (stream->state == LocalStream::State::Failed ? "failed" :
+                                                                 (stream->state == LocalStream::State::Closed ? "closed"
+                                                                                                             : "pending")))
+                                                            << (stream->error.empty() ? "" : " error=" + stream->error));
     }
 
     if (!open_succeeded) {
@@ -1318,16 +1408,28 @@ void ClientRuntime::accept_one() {
     PROXY_LOG(Info, "[client] 远端流已打开 stream=" << stream->id
                                                    << " target=" << describe_socks5_target(accepted.target));
     if (!accepted.initial_payload.empty()) {
+        PROXY_LOG(Debug, "[client] 发送初始请求负载 stream=" << stream->id
+                                                            << " bytes=" << accepted.initial_payload.size());
         queue_frame(FrameType::Data, stream->id, accepted.initial_payload);
     }
     if (accepted.protocol == LocalProxyProtocol::Socks5) {
         if (!send_socks5_reply(sock, 0x00)) {
             close_stream(stream->id, true);
+            return;
         }
+        PROXY_LOG(Debug, "[client] 已发送 SOCKS5 成功响应 stream=" << stream->id);
     } else if (accepted.protocol == LocalProxyProtocol::HttpConnect) {
         if (!send_http_proxy_response(sock, 200, "Connection Established")) {
             close_stream(stream->id, true);
+            return;
         }
+        PROXY_LOG(Debug, "[client] 已发送 HTTP CONNECT 200 stream=" << stream->id);
+    }
+
+    std::string nonblocking_error;
+    if (!proxy::set_socket_nonblocking(sock, true, nonblocking_error)) {
+        PROXY_LOG(Warn, "[client] 设置本地流为非阻塞失败 stream=" << stream->id
+                                                                   << " error=" << nonblocking_error);
     }
 }
 
@@ -1347,10 +1449,17 @@ void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream
 #else
     const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
 #endif
+    if (ret < 0) {
+        const int code = proxy::last_socket_error_code();
+        if (is_socket_would_block(code)) {
+            return;
+        }
+    }
     if (ret <= 0) {
         close_stream(stream->id, true);
         return;
     }
+    PROXY_LOG(Debug, "[client] 读取本地上行数据 stream=" << stream->id << " bytes=" << ret);
     queue_frame(FrameType::Data, stream->id,
                 std::vector<std::uint8_t>(buf.begin(), buf.begin() + ret));
 }
@@ -1381,6 +1490,8 @@ void ClientRuntime::close_stream(std::uint32_t id, bool notify_remote) {
         sock = stream->sock;
         stream->sock = kInvalidSocket;
         stream->state = LocalStream::State::Closed;
+        stream->pending_downlink.clear();
+        stream->pending_downlink_offset = 0;
     }
     close_socket(sock);
     stream->cv.notify_all();
@@ -1398,6 +1509,8 @@ void ClientRuntime::close_all_streams() {
         sock = kv.second->sock;
         kv.second->sock = kInvalidSocket;
         kv.second->state = LocalStream::State::Closed;
+        kv.second->pending_downlink.clear();
+        kv.second->pending_downlink_offset = 0;
         kv.second->cv.notify_all();
         close_socket(sock);
     }
@@ -1509,13 +1622,36 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    ClientRuntime runtime(cfg);
-    if (!runtime.start()) {
-        PROXY_LOG(Error, "[client] runtime.start() 返回失败");
+    const socket_t listener = ClientRuntime::make_listener(cfg.listen_port);
+    if (listener == kInvalidSocket) {
+        PROXY_LOG(Error, "[client] 本地监听失败");
         return 1;
     }
-    PROXY_LOG(Info, "[client] runtime.start() 正常结束");
-    return 0;
+    struct ListenerCloser {
+        socket_t sock;
+        ~ListenerCloser() {
+            if (sock != kInvalidSocket) {
+                close_socket(sock);
+            }
+        }
+    } listener_closer{listener};
+
+    while (true) {
+        ClientRuntime runtime(cfg, listener);
+        if (runtime.start()) {
+            PROXY_LOG(Info, "[client] runtime.start() 正常结束");
+            return 0;
+        }
+
+        if (!runtime.should_retry()) {
+            PROXY_LOG(Error, "[client] runtime.start() 返回失败");
+            return 1;
+        }
+
+        PROXY_LOG(Warn, "[client] 隧道连接已断开，3 秒后自动重连"
+                            << (runtime.last_error().empty() ? "" : " reason=" + runtime.last_error()));
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+    }
     } catch (const std::exception& ex) {
         std::cerr << "[client] main 未捕获异常: " << ex.what() << "\n";
         return 1;

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -47,7 +48,6 @@ using proxy::encode_open_ok;
 using proxy::FrameHeader;
 using proxy::FrameType;
 using proxy::kInvalidSocket;
-using proxy::parse_frames;
 using proxy::parse_log_level;
 using proxy::recv_exact;
 using proxy::send_all_raw;
@@ -354,6 +354,13 @@ private:
         socket_t sock = kInvalidSocket;
     };
 
+    struct DownlinkFrame {
+        FrameType type = FrameType::Data;
+        std::uint32_t stream_id = 0;
+        std::vector<std::uint8_t> encoded;
+        std::size_t offset = 0;
+    };
+
     struct RequestState {
         enum class ResponseMode {
             None,
@@ -380,6 +387,7 @@ private:
     void submit_static_response(int32_t stream_id, int status, const std::string& content_type,
                                 const std::vector<std::uint8_t>& body);
     void enqueue_downlink(FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload);
+    void purge_downlink_data_for_stream(std::uint32_t stream_id);
     void close_logical_stream(std::uint32_t stream_id, bool notify_client);
     void close_all_upstreams();
     std::string get_header_value_ci(const RequestState& request, const std::string& name) const;
@@ -406,8 +414,8 @@ private:
     nghttp2_session* h2_ = nullptr;
     std::map<int32_t, RequestState> requests_;
     std::map<std::uint32_t, UpstreamStream> streams_;
-    std::vector<std::uint8_t> downlink_;
-    std::size_t downlink_offset_ = 0;
+    std::deque<DownlinkFrame> downlink_control_;
+    std::deque<DownlinkFrame> downlink_data_;
     int32_t event_stream_id_ = -1;
     bool tunnel_opened_ = false;
     bool running_ = true;
@@ -516,7 +524,7 @@ void Http2ServerConnection::loop() {
             }
         }
 
-        if (!downlink_.empty() && event_stream_id_ >= 0) {
+        if ((!downlink_control_.empty() || !downlink_data_.empty()) && event_stream_id_ >= 0) {
             nghttp2_session_resume_data(h2_, event_stream_id_);
             if (!flush_session()) {
                 running_ = false;
@@ -604,9 +612,36 @@ void Http2ServerConnection::submit_static_response(int32_t stream_id, int status
 
 void Http2ServerConnection::enqueue_downlink(FrameType type, std::uint32_t stream_id,
                                              const std::vector<std::uint8_t>& payload) {
-    proxy::append_frame(downlink_, type, stream_id, payload);
+    auto& queue = (type == FrameType::Data) ? downlink_data_ : downlink_control_;
+    DownlinkFrame frame;
+    frame.type = type;
+    frame.stream_id = stream_id;
+    proxy::append_frame(frame.encoded, type, stream_id, payload);
+    queue.push_back(std::move(frame));
     if (event_stream_id_ >= 0) {
         nghttp2_session_resume_data(h2_, event_stream_id_);
+    }
+}
+
+void Http2ServerConnection::purge_downlink_data_for_stream(std::uint32_t stream_id) {
+    std::size_t dropped_frames = 0;
+    std::size_t dropped_bytes = 0;
+    for (auto it = downlink_data_.begin(); it != downlink_data_.end();) {
+        if (it->type == FrameType::Data && it->stream_id == stream_id) {
+            ++dropped_frames;
+            if (it->encoded.size() > it->offset) {
+                dropped_bytes += it->encoded.size() - it->offset;
+            }
+            it = downlink_data_.erase(it);
+            continue;
+        }
+        ++it;
+    }
+
+    if (dropped_frames > 0) {
+        PROXY_LOG(Debug, "[server] 清理已关闭流的下行残留 stream=" << stream_id
+                                                                    << " frames=" << dropped_frames
+                                                                    << " bytes=" << dropped_bytes);
     }
 }
 
@@ -619,6 +654,7 @@ void Http2ServerConnection::close_logical_stream(std::uint32_t stream_id, bool n
                                                    << (notify_client ? " notify_client=yes" : " notify_client=no"));
     close_socket(it->second.sock);
     streams_.erase(it);
+    purge_downlink_data_for_stream(stream_id);
     if (notify_client) {
         enqueue_downlink(FrameType::Close, stream_id, {});
     }
@@ -806,22 +842,35 @@ nghttp2_ssize Http2ServerConnection::read_response_body(nghttp2_session* /*sessi
     auto* self = static_cast<Http2ServerConnection*>(user_data);
     auto* request = static_cast<RequestState*>(source->ptr);
     if (request->response_mode == RequestState::ResponseMode::EventStream) {
-        const std::size_t available = self->downlink_.size() - self->downlink_offset_;
-        if (available == 0) {
+        DownlinkFrame* active_frame = nullptr;
+        if (!self->downlink_control_.empty()) {
+            active_frame = &self->downlink_control_.front();
+        } else if (!self->downlink_data_.empty()) {
+            active_frame = &self->downlink_data_.front();
+        }
+
+        if (active_frame == nullptr) {
             if (!self->running_) {
                 *data_flags |= NGHTTP2_DATA_FLAG_EOF;
                 return 0;
             }
             return NGHTTP2_ERR_DEFERRED;
         }
+
+        const std::size_t available = active_frame->encoded.size() - active_frame->offset;
         const std::size_t copy_len = available < length ? available : length;
-        std::memcpy(buf, self->downlink_.data() + self->downlink_offset_, copy_len);
-        self->downlink_offset_ += copy_len;
-        if (self->downlink_offset_ >= self->downlink_.size()) {
-            self->downlink_.clear();
-            self->downlink_offset_ = 0;
-            if (!self->running_) {
+        std::memcpy(buf, active_frame->encoded.data() + active_frame->offset, copy_len);
+        active_frame->offset += copy_len;
+        if (active_frame->offset >= active_frame->encoded.size()) {
+            if (!self->downlink_control_.empty()) {
+                self->downlink_control_.pop_front();
+            } else if (!self->downlink_data_.empty()) {
+                self->downlink_data_.pop_front();
+            }
+            if (!self->running_ && self->downlink_control_.empty() && self->downlink_data_.empty()) {
                 *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            } else if (!self->downlink_control_.empty() || !self->downlink_data_.empty()) {
+                nghttp2_session_resume_data(self->h2_, self->event_stream_id_);
             }
         }
         return static_cast<nghttp2_ssize>(copy_len);
