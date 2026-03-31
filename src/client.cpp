@@ -7,8 +7,10 @@
 #include <nghttp2/nghttp2.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstring>
 #include <cstdint>
@@ -18,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <exception>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -71,6 +74,18 @@ struct ClientConfig {
 struct HeaderField {
     std::string name;
     std::string value;
+};
+
+enum class LocalProxyProtocol {
+    Socks5,
+    HttpConnect,
+    HttpForward
+};
+
+struct AcceptedProxyRequest {
+    Socks5Request target;
+    LocalProxyProtocol protocol = LocalProxyProtocol::Socks5;
+    std::vector<std::uint8_t> initial_payload;
 };
 
 nghttp2_nv make_nv(const std::string& name, const std::string& value) {
@@ -141,6 +156,254 @@ const char* socks5_atyp_name(std::uint8_t atyp) {
         default:
             return "unknown";
     }
+}
+
+std::string ascii_lower(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+std::string trim_ascii(std::string text) {
+    auto not_space = [](unsigned char ch) {
+        return !std::isspace(ch);
+    };
+    auto begin = std::find_if(text.begin(), text.end(), not_space);
+    if (begin == text.end()) {
+        return {};
+    }
+    auto end = std::find_if(text.rbegin(), text.rend(), not_space).base();
+    return std::string(begin, end);
+}
+
+std::uint8_t detect_atyp_from_host(const std::string& host) {
+    in_addr ipv4{};
+    if (::inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
+        return 0x01;
+    }
+    in6_addr ipv6{};
+    if (::inet_pton(AF_INET6, host.c_str(), &ipv6) == 1) {
+        return 0x04;
+    }
+    return 0x03;
+}
+
+bool recv_http_headers(socket_t sock, std::string& raw_request, std::string& error) {
+    raw_request.clear();
+    constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
+    char ch = '\0';
+    while (raw_request.size() < kMaxHeaderBytes) {
+#ifdef _WIN32
+        const int ret = ::recv(sock, &ch, 1, 0);
+#else
+        const int ret = static_cast<int>(::recv(sock, &ch, 1, 0));
+#endif
+        if (ret == 0) {
+            error = "HTTP 客户端已断开";
+            return false;
+        }
+        if (ret < 0) {
+            error = "读取 HTTP 请求头失败";
+            return false;
+        }
+        raw_request.push_back(ch);
+        if (raw_request.size() >= 4 &&
+            raw_request.compare(raw_request.size() - 4, 4, "\r\n\r\n") == 0) {
+            return true;
+        }
+    }
+
+    error = "HTTP 请求头过大";
+    return false;
+}
+
+bool parse_http_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std::string& error) {
+    std::string raw_request;
+    if (!recv_http_headers(sock, raw_request, error)) {
+        return false;
+    }
+
+    const auto header_end = raw_request.find("\r\n\r\n");
+    if (header_end == std::string::npos) {
+        error = "HTTP 请求头不完整";
+        return false;
+    }
+
+    std::istringstream stream(raw_request.substr(0, header_end));
+    std::string request_line;
+    if (!std::getline(stream, request_line)) {
+        error = "HTTP 请求行为空";
+        return false;
+    }
+    if (!request_line.empty() && request_line.back() == '\r') {
+        request_line.pop_back();
+    }
+
+    std::istringstream request_line_stream(request_line);
+    std::string method;
+    std::string target_text;
+    std::string version;
+    request_line_stream >> method >> target_text >> version;
+    if (method.empty() || target_text.empty() || version.empty()) {
+        error = "HTTP 请求行格式错误";
+        return false;
+    }
+
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string host_header;
+    for (std::string line; std::getline(stream, line);) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) {
+            error = "HTTP 请求头格式错误";
+            return false;
+        }
+        std::string name = trim_ascii(line.substr(0, colon));
+        std::string value = trim_ascii(line.substr(colon + 1));
+        if (ascii_lower(name) == "host") {
+            host_header = value;
+        }
+        headers.emplace_back(std::move(name), std::move(value));
+    }
+
+    Socks5Request req;
+    if (ascii_lower(method) == "connect") {
+        std::string connect_target = target_text;
+        if (!parse_host_port(connect_target, req.host, req.port)) {
+            const auto colon = connect_target.rfind(':');
+            if (colon == std::string::npos) {
+                error = "CONNECT 缺少目标端口";
+                return false;
+            }
+            req.host = connect_target.substr(0, colon);
+            req.port = static_cast<std::uint16_t>(std::stoi(connect_target.substr(colon + 1)));
+        }
+        req.atyp = detect_atyp_from_host(req.host);
+        accepted.target = std::move(req);
+        accepted.protocol = LocalProxyProtocol::HttpConnect;
+        accepted.initial_payload.clear();
+        return true;
+    }
+
+    std::string remote_host;
+    std::uint16_t remote_port = 80;
+    std::string request_target = target_text;
+
+    const std::string lowered_target = ascii_lower(target_text);
+    if (lowered_target.rfind("http://", 0) == 0) {
+        const std::string authority_and_path = target_text.substr(7);
+        const auto slash = authority_and_path.find('/');
+        const std::string authority = slash == std::string::npos
+            ? authority_and_path
+            : authority_and_path.substr(0, slash);
+        request_target = slash == std::string::npos
+            ? "/"
+            : authority_and_path.substr(slash);
+        if (!parse_host_port(authority, remote_host, remote_port)) {
+            remote_host = authority;
+            remote_port = 80;
+        }
+    } else {
+        if (host_header.empty()) {
+            error = "HTTP 代理请求缺少 Host";
+            return false;
+        }
+        if (!parse_host_port(host_header, remote_host, remote_port)) {
+            remote_host = host_header;
+            remote_port = 80;
+        }
+    }
+
+    if (remote_host.empty()) {
+        error = "无法解析 HTTP 目标主机";
+        return false;
+    }
+
+    req.host = remote_host;
+    req.port = remote_port;
+    req.atyp = detect_atyp_from_host(req.host);
+
+    std::ostringstream rebuilt;
+    rebuilt << method << " " << request_target << " " << version << "\r\n";
+    bool has_host = false;
+    for (const auto& header : headers) {
+        const std::string lower_name = ascii_lower(header.first);
+        if (lower_name == "proxy-connection") {
+            continue;
+        }
+        if (lower_name == "host") {
+            has_host = true;
+        }
+        rebuilt << header.first << ": " << header.second << "\r\n";
+    }
+    if (!has_host) {
+        rebuilt << "Host: " << remote_host;
+        if (remote_port != 80) {
+            rebuilt << ":" << remote_port;
+        }
+        rebuilt << "\r\n";
+    }
+    rebuilt << "\r\n";
+
+    accepted.target = std::move(req);
+    accepted.protocol = LocalProxyProtocol::HttpForward;
+    const std::string rebuilt_request = rebuilt.str();
+    accepted.initial_payload.assign(rebuilt_request.begin(), rebuilt_request.end());
+    return true;
+}
+
+bool send_http_proxy_response(socket_t sock, int status_code, const std::string& reason,
+                              const std::string& body = {}) {
+    std::ostringstream response;
+    response << "HTTP/1.1 " << status_code << " " << reason << "\r\n";
+    if (status_code == 200 && ascii_lower(reason) == "connection established") {
+        response << "Proxy-Agent: qtunnel\r\n\r\n";
+    } else {
+        response << "Connection: close\r\n"
+                 << "Content-Length: " << body.size() << "\r\n"
+                 << "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                 << body;
+    }
+    const std::string payload = response.str();
+    std::string error;
+    return send_all_raw(sock, reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size(), error);
+}
+
+bool accept_local_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std::string& error) {
+    unsigned char first_byte = 0;
+#ifdef _WIN32
+    const int peeked = ::recv(sock, reinterpret_cast<char*>(&first_byte), 1, MSG_PEEK);
+#else
+    const int peeked = static_cast<int>(::recv(sock, &first_byte, 1, MSG_PEEK));
+#endif
+    if (peeked == 0) {
+        error = "客户端已断开";
+        return false;
+    }
+    if (peeked < 0) {
+        error = "读取本地代理协议失败";
+        return false;
+    }
+
+    if (first_byte == 0x05) {
+        accepted.protocol = LocalProxyProtocol::Socks5;
+        accepted.initial_payload.clear();
+        const Socks5HandshakeStatus handshake_status = perform_socks5_handshake(sock, accepted.target, error);
+        return handshake_status == Socks5HandshakeStatus::Ok;
+    }
+
+    if (std::isalpha(first_byte) != 0) {
+        return parse_http_proxy_request(sock, accepted, error);
+    }
+
+    error = "不支持的本地代理协议";
+    return false;
 }
 
 class ClientRuntime {
@@ -448,7 +711,7 @@ bool ClientRuntime::start() {
     if (!peer_fingerprint_.empty()) {
         PROXY_LOG(Debug, "[client] 服务器证书 SHA-256 指纹: " << peer_fingerprint_);
     }
-    PROXY_LOG(Info, "[client] SOCKS5 监听 127.0.0.1:" << cfg_.listen_port);
+    PROXY_LOG(Info, "[client] 本地代理监听 127.0.0.1:" << cfg_.listen_port << " (SOCKS5 + HTTP)");
     accept_and_pump_loop();
     if (!io_error_.empty()) {
         PROXY_LOG(Error, "[client] 客户端停止: " << io_error_);
@@ -994,12 +1257,15 @@ void ClientRuntime::accept_one() {
         return;
     }
 
-    Socks5Request req;
+    AcceptedProxyRequest accepted;
     std::string error;
-    const Socks5HandshakeStatus handshake_status = perform_socks5_handshake(sock, req, error);
-    if (handshake_status != Socks5HandshakeStatus::Ok) {
-        if (handshake_status == Socks5HandshakeStatus::Error) {
-            PROXY_LOG(Warn, "[client] SOCKS5 握手失败: " << error);
+    if (!accept_local_proxy_request(sock, accepted, error)) {
+        if (!error.empty()) {
+            PROXY_LOG(Warn, "[client] 本地代理握手失败: " << error);
+        }
+        if (accepted.protocol == LocalProxyProtocol::HttpConnect ||
+            accepted.protocol == LocalProxyProtocol::HttpForward) {
+            send_http_proxy_response(sock, 400, "Bad Request", error.empty() ? "bad proxy request" : error);
         }
         close_socket(sock);
         return;
@@ -1014,10 +1280,14 @@ void ClientRuntime::accept_one() {
     }
 
     PROXY_LOG(Info, "[client] 新建本地连接 stream=" << stream->id
-                                                     << " target=" << describe_socks5_target(req)
-                                                     << " atyp=" << socks5_atyp_name(req.atyp));
+                                                     << " target=" << describe_socks5_target(accepted.target)
+                                                     << " atyp=" << socks5_atyp_name(accepted.target.atyp)
+                                                     << " proto="
+                                                     << (accepted.protocol == LocalProxyProtocol::Socks5 ? "socks5" :
+                                                         (accepted.protocol == LocalProxyProtocol::HttpConnect ? "http-connect"
+                                                                                                               : "http")));
 
-    queue_frame(FrameType::Open, stream->id, encode_open_request(req));
+    queue_frame(FrameType::Open, stream->id, encode_open_request(accepted.target));
     bool open_succeeded = false;
     {
         std::unique_lock<std::mutex> lock(stream->mutex);
@@ -1031,19 +1301,33 @@ void ClientRuntime::accept_one() {
 
     if (!open_succeeded) {
         PROXY_LOG(Warn, "[client] 打开远端流失败 stream=" << stream->id
-                                                           << " target=" << describe_socks5_target(req)
+                                                           << " target=" << describe_socks5_target(accepted.target)
                                                            << (stream->error.empty() ? "" : " error=" + stream->error));
-        if (stream->state == LocalStream::State::Failed) {
+        if (stream->state == LocalStream::State::Failed &&
+            accepted.protocol == LocalProxyProtocol::Socks5) {
             send_socks5_reply(sock, 0x05);
+        } else if (accepted.protocol == LocalProxyProtocol::HttpConnect ||
+                   accepted.protocol == LocalProxyProtocol::HttpForward) {
+            send_http_proxy_response(sock, 502, "Bad Gateway",
+                                     stream->error.empty() ? "open remote stream failed" : stream->error);
         }
         close_stream(stream->id, false);
         return;
     }
 
     PROXY_LOG(Info, "[client] 远端流已打开 stream=" << stream->id
-                                                   << " target=" << describe_socks5_target(req));
-    if (!send_socks5_reply(sock, 0x00)) {
-        close_stream(stream->id, true);
+                                                   << " target=" << describe_socks5_target(accepted.target));
+    if (!accepted.initial_payload.empty()) {
+        queue_frame(FrameType::Data, stream->id, accepted.initial_payload);
+    }
+    if (accepted.protocol == LocalProxyProtocol::Socks5) {
+        if (!send_socks5_reply(sock, 0x00)) {
+            close_stream(stream->id, true);
+        }
+    } else if (accepted.protocol == LocalProxyProtocol::HttpConnect) {
+        if (!send_http_proxy_response(sock, 200, "Connection Established")) {
+            close_stream(stream->id, true);
+        }
     }
 }
 
@@ -1177,7 +1461,7 @@ void print_usage() {
         << "  client <server_host:port> [--listen <port>]\n\n"
         << "说明:\n"
         << "  <server_host:port>   远端 HTTP/2 TLS 隧道服务地址\n"
-        << "  --listen <port>      本地 SOCKS5 监听端口, 默认 1080\n"
+        << "  --listen <port>      本地代理监听端口, 默认 1080 (支持 SOCKS5 + HTTP)\n"
         << "  --auth-password <pw> 发送到服务端 /api/tunnel/* 的预共享密码\n"
         << "  --log-level <level>  日志级别: error|warn|info|debug, 默认 info\n\n"
         << "  --ech-config <b64>   base64-encoded ECHConfigList\n"

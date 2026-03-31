@@ -60,20 +60,20 @@ add_custom_command(
 
 add_custom_target(generate_homepage_header DEPENDS ${HOMEPAGE_HTML_HEADER})
 
-add_executable(server
+add_executable(qtunnel_server
     src/server.cpp
     ${HOMEPAGE_HTML_HEADER}
 )
-add_dependencies(server generate_homepage_header)
-target_include_directories(server PRIVATE ${COMMON_INCLUDE_DIR} ${GENERATED_INCLUDE_DIR})
+add_dependencies(qtunnel_server generate_homepage_header)
+target_include_directories(qtunnel_server PRIVATE ${COMMON_INCLUDE_DIR} ${GENERATED_INCLUDE_DIR})
 
-add_executable(client
+add_executable(qtunnel_client
     src/client.cpp
 )
-target_include_directories(client PRIVATE ${COMMON_INCLUDE_DIR})
+target_include_directories(qtunnel_client PRIVATE ${COMMON_INCLUDE_DIR})
 
 if(MSVC)
-    target_compile_options(server PRIVATE
+    target_compile_options(qtunnel_server PRIVATE
         /W4
         /EHsc
         /permissive-
@@ -82,7 +82,7 @@ if(MSVC)
         $<$<CONFIG:RelWithDebInfo>:/O2>
         $<$<CONFIG:MinSizeRel>:/O1>
     )
-    target_compile_options(client PRIVATE
+    target_compile_options(qtunnel_client PRIVATE
         /W4
         /EHsc
         /permissive-
@@ -92,8 +92,8 @@ if(MSVC)
         $<$<CONFIG:MinSizeRel>:/O1>
     )
 else()
-    target_compile_options(server PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter -Os)
-    target_compile_options(client PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter -Os)
+    target_compile_options(qtunnel_server PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter -Os)
+    target_compile_options(qtunnel_client PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter -Os)
 endif()
 
 set(PROXY_TLS_LIBRARIES nghttp2_static)
@@ -106,5 +106,5 @@ endif()
 add_library(proxy_tls_ssl INTERFACE)
 target_link_libraries(proxy_tls_ssl INTERFACE ssl crypto)
 
-target_link_libraries(server PRIVATE proxy_tls_ssl ${PROXY_TLS_LIBRARIES})
-target_link_libraries(client PRIVATE proxy_tls_ssl ${PROXY_TLS_LIBRARIES})
+target_link_libraries(qtunnel_server PRIVATE proxy_tls_ssl ${PROXY_TLS_LIBRARIES})
+target_link_libraries(qtunnel_client PRIVATE proxy_tls_ssl ${PROXY_TLS_LIBRARIES})
