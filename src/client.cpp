@@ -64,6 +64,7 @@ using proxy::TlsSocket;
 
 struct ClientConfig {
     std::string server_host;
+    std::string listen_host;
     std::uint16_t server_port = 8443;
     std::uint16_t listen_port = 1080;
     std::string auth_password;
@@ -431,7 +432,7 @@ public:
     bool start();
     bool should_retry() const { return should_retry_; }
     const std::string& last_error() const { return io_error_; }
-    static socket_t make_listener(std::uint16_t port);
+    static socket_t make_listener(std::uint16_t port,std::string host);
 
 private:
     struct LocalStream {
@@ -729,7 +730,7 @@ bool ClientRuntime::start() {
     if (!peer_fingerprint_.empty()) {
         PROXY_LOG(Debug, "[client] 服务器证书 SHA-256 指纹: " << peer_fingerprint_);
     }
-    PROXY_LOG(Info, "[client] 本地代理监听 127.0.0.1:" << cfg_.listen_port << " (SOCKS5 + HTTP)");
+    PROXY_LOG(Info, "[client] 本地代理监听 " << cfg_.listen_host << ":" << cfg_.listen_port << " (SOCKS5 + HTTP)");
     should_retry_ = true;
     accept_and_pump_loop();
     if (!io_error_.empty()) {
@@ -1521,17 +1522,28 @@ bool ClientRuntime::is_stream_active(std::uint32_t id) {
     return streams_.find(id) != streams_.end();
 }
 
-socket_t ClientRuntime::make_listener(std::uint16_t port) {
+socket_t ClientRuntime::make_listener(std::uint16_t port, std::string host) {
     socket_t sock = static_cast<socket_t>(::socket(AF_INET, SOCK_STREAM, 0));
     if (sock == kInvalidSocket) {
         return kInvalidSocket;
     }
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+    
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    
+    // 处理 host
+    if (host.empty() || host == "localhost" || host == "127.0.0.1") {
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    } else if (host == "0.0.0.0" || host == "*") {
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    } else if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        close_socket(sock);
+        return kInvalidSocket;  // 无效的 IP 地址
+    }
+    
     if (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         close_socket(sock);
         return kInvalidSocket;
@@ -1552,6 +1564,10 @@ ClientConfig parse_args(int argc, char** argv) {
         const std::string arg = argv[i];
         if (arg == "--listen" && i + 1 < argc) {
             cfg.listen_port = static_cast<std::uint16_t>(std::stoi(argv[++i]));
+        } else if (arg == "--auth-password" && i + 1 < argc) {
+            cfg.auth_password = argv[++i];
+        } else if (arg == "--listen-host" && i + 1 < argc) {
+            cfg.listen_host = argv[++i];
         } else if (arg == "--auth-password" && i + 1 < argc) {
             cfg.auth_password = argv[++i];
         } else if (arg == "--ech-config" && i + 1 < argc) {
@@ -1575,6 +1591,7 @@ void print_usage() {
         << "说明:\n"
         << "  <server_host:port>   远端 HTTP/2 TLS 隧道服务地址\n"
         << "  --listen <port>      本地代理监听端口, 默认 1080 (支持 SOCKS5 + HTTP)\n"
+        << "  --listen-host <0.0.0.0>      本地代理监听地址, 默认 127.0.0.1\n"
         << "  --auth-password <pw> 发送到服务端 /api/tunnel/* 的预共享密码\n"
         << "  --log-level <level>  日志级别: error|warn|info|debug, 默认 info\n\n"
         << "  --ech-config <b64>   base64-encoded ECHConfigList\n"
@@ -1622,7 +1639,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const socket_t listener = ClientRuntime::make_listener(cfg.listen_port);
+    const socket_t listener = ClientRuntime::make_listener(cfg.listen_port,cfg.listen_host);
     if (listener == kInvalidSocket) {
         PROXY_LOG(Error, "[client] 本地监听失败");
         return 1;
