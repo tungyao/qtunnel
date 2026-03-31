@@ -36,11 +36,11 @@
 
 namespace {
 
-constexpr std::size_t kTunnelIoChunkSize = 64 * 1024;
+constexpr std::size_t kTunnelIoChunkSize = 256 * 1024;
 constexpr long kTunnelPollIntervalUsec = 5000;
-constexpr std::int32_t kHttp2WindowSize = 1 * 1024 * 1024;
-constexpr std::uint32_t kHttp2MaxFrameSize = 256 * 1024;
-constexpr std::size_t kMaxBufferedDownlinkBytes = 8 * 1024 * 1024;
+constexpr std::int32_t kHttp2WindowSize = 16 * 1024 * 1024;
+constexpr std::uint32_t kHttp2MaxFrameSize = 1024 * 1024;
+constexpr std::size_t kMaxBufferedDownlinkBytes = 32 * 1024 * 1024;
 
 using proxy::close_socket;
 using proxy::consume_frames;
