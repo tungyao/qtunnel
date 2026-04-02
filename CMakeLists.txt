@@ -62,6 +62,8 @@ add_custom_target(generate_homepage_header DEPENDS ${HOMEPAGE_HTML_HEADER})
 
 add_executable(qtunnel_server
     src/server.cpp
+    src/server_connection.cpp
+    src/common/reactor.cpp
     ${HOMEPAGE_HTML_HEADER}
 )
 add_dependencies(qtunnel_server generate_homepage_header)

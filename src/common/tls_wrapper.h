@@ -41,6 +41,8 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#include "logging.h"
+
 namespace proxy {
 
 #ifndef PROXY_SOCKET_TYPES_DEFINED
@@ -799,6 +801,14 @@ private:
         return true;
     }
 public:
+    enum class IoStatus {
+        Ok,
+        WantRead,
+        WantWrite,
+        Closed,
+        Error
+    };
+
     TlsSocket() = default;
     ~TlsSocket() { shutdown(); }
 
@@ -961,6 +971,72 @@ public:
         return true;
     }
 
+    bool begin_accept_server(socket_t accepted_socket,
+                             const std::string& cert_file = std::string(),
+                             const std::string& key_file = std::string()) {
+        shutdown();
+        if (!openssl_global_init()) {
+            last_error_ = "OpenSSL init failed";
+            close_socket(accepted_socket);
+            return false;
+        }
+
+        ctx_.reset(SSL_CTX_new(TLS_server_method()));
+        if (!ctx_) {
+            last_error_ = "SSL_CTX_new(server) failed";
+            close_socket(accepted_socket);
+            return false;
+        }
+        configure_common_ctx(true);
+        if (!cert_file.empty() || !key_file.empty()) {
+            if (cert_file.empty() || key_file.empty()) {
+                last_error_ = "cert_file and key_file must be provided together";
+                close_socket(accepted_socket);
+                return false;
+            }
+            if (!load_server_credentials(cert_file, key_file)) {
+                close_socket(accepted_socket);
+                return false;
+            }
+        } else if (!generate_server_credentials()) {
+            close_socket(accepted_socket);
+            return false;
+        }
+        if (SSL_CTX_use_certificate(ctx_.get(), cert_.get()) != 1 ||
+            SSL_CTX_use_PrivateKey(ctx_.get(), pkey_.get()) != 1 ||
+            SSL_CTX_check_private_key(ctx_.get()) != 1) {
+            last_error_ = openssl_error_string("Load server certificate failed");
+            close_socket(accepted_socket);
+            return false;
+        }
+
+        socket_ = accepted_socket;
+        ssl_.reset(SSL_new(ctx_.get()));
+        if (!ssl_) {
+            last_error_ = "SSL_new(server) failed";
+            shutdown();
+            return false;
+        }
+        SSL_set_fd(ssl_.get(), static_cast<int>(socket_));
+        return true;
+    }
+
+    IoStatus continue_accept_server() {
+        if (!ssl_) {
+            last_error_ = "SSL state is not initialized";
+            return IoStatus::Error;
+        }
+
+        ERR_clear_error();
+        const int accept_ret = SSL_accept(ssl_.get());
+        if (accept_ret == 1) {
+            cache_tls_diagnostics();
+            connected_ = true;
+            return IoStatus::Ok;
+        }
+        return classify_io_result("SSL_accept failed", accept_ret, true);
+    }
+
     int read(std::uint8_t* data, std::size_t len) {
         if (!connected_ || len == 0) {
             return 0;
@@ -977,6 +1053,21 @@ public:
         return ret;
     }
 
+    IoStatus read_nonblocking(std::uint8_t* data, std::size_t len, std::size_t& bytes_read) {
+        bytes_read = 0;
+        if (!connected_ || len == 0) {
+            return IoStatus::Closed;
+        }
+
+        ERR_clear_error();
+        const int ret = SSL_read(ssl_.get(), data, static_cast<int>(len));
+        if (ret > 0) {
+            bytes_read = static_cast<std::size_t>(ret);
+            return IoStatus::Ok;
+        }
+        return classify_io_result("SSL_read failed", ret, true);
+    }
+
     int write(const std::uint8_t* data, std::size_t len) {
         if (!connected_ || len == 0) {
             return 0;
@@ -988,6 +1079,21 @@ public:
             return -1;
         }
         return ret;
+    }
+
+    IoStatus write_nonblocking(const std::uint8_t* data, std::size_t len, std::size_t& bytes_written) {
+        bytes_written = 0;
+        if (!connected_ || len == 0) {
+            return IoStatus::Closed;
+        }
+
+        ERR_clear_error();
+        const int ret = SSL_write(ssl_.get(), data, static_cast<int>(len));
+        if (ret > 0) {
+            bytes_written = static_cast<std::size_t>(ret);
+            return IoStatus::Ok;
+        }
+        return classify_io_result("SSL_write failed", ret, false);
     }
 
     bool write_all(const std::uint8_t* data, std::size_t len) {
@@ -1253,6 +1359,21 @@ private:
         }
         last_error_ = "ALPN 未协商到 h2";
         return false;
+    }
+
+    IoStatus classify_io_result(const std::string& prefix, int ret, bool treat_zero_as_closed) {
+        const int err = SSL_get_error(ssl_.get(), ret);
+        if (err == SSL_ERROR_WANT_READ) {
+            return IoStatus::WantRead;
+        }
+        if (err == SSL_ERROR_WANT_WRITE) {
+            return IoStatus::WantWrite;
+        }
+        if (treat_zero_as_closed && (err == SSL_ERROR_ZERO_RETURN || ret == 0)) {
+            return IoStatus::Closed;
+        }
+        last_error_ = ssl_io_error_string(prefix, ssl_.get(), ret);
+        return IoStatus::Error;
     }
 
     bool load_server_credentials(const std::string& cert_file, const std::string& key_file) {
