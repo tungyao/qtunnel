@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -36,7 +37,6 @@
 namespace {
 
 constexpr std::size_t kTunnelIoChunkSize = 256 * 1024;
-constexpr long kTunnelPollIntervalUsec = 5000;
 constexpr std::int32_t kHttp2WindowSize = 16 * 1024 * 1024;
 constexpr std::uint32_t kHttp2MaxFrameSize = 1024 * 1024;
 
@@ -45,15 +45,18 @@ using proxy::connect_tcp;
 using proxy::decode_open_request;
 using proxy::encode_open_fail;
 using proxy::encode_open_ok;
+using proxy::EventDispatcher;
+using proxy::EventNotifier;
 using proxy::FrameHeader;
 using proxy::FrameType;
 using proxy::kInvalidSocket;
 using proxy::parse_log_level;
 using proxy::recv_exact;
-using proxy::send_all_raw;
 using proxy::send_exact;
 using proxy::set_log_level;
+using proxy::set_socket_nonblocking;
 using proxy::select_http2_padded_length;
+using proxy::SocketEvent;
 using proxy::socket_t;
 using proxy::LogLevel;
 using proxy::TlsSocket;
@@ -119,6 +122,21 @@ int ascii_casecmp(const char* lhs, const char* rhs) {
 #else
     return strcasecmp(lhs, rhs);
 #endif
+}
+
+bool is_socket_would_block(int code) {
+#ifdef _WIN32
+    return code == WSAEWOULDBLOCK;
+#else
+    return code == EAGAIN || code == EWOULDBLOCK;
+#endif
+}
+
+void signal_notifier(EventNotifier& notifier, const char* owner, const char* action) {
+    std::string error;
+    if (!notifier.signal(error) && !error.empty()) {
+        PROXY_LOG(Debug, "[" << owner << "] " << action << " 唤醒失败: " << error);
+    }
 }
 
 bool parse_host_port(const std::string& text, std::string& host, std::uint16_t& port) {
@@ -240,16 +258,25 @@ bool open_upstream_channel(const ServerConfig& config, std::uint8_t requested_at
                            socket_t& upstream, std::string& error) {
     if (!config.has_fixed_target || config.target_type == ServerConfig::TargetType::Direct) {
         upstream = connect_tcp(requested_host, requested_port, error);
-        return upstream != kInvalidSocket;
+        if (upstream == kInvalidSocket) {
+            return false;
+        }
+    } else {
+        upstream = connect_tcp(config.fixed_host, config.fixed_port, error);
+        if (upstream == kInvalidSocket) {
+            return false;
+        }
+        if (config.target_type != ServerConfig::TargetType::Raw &&
+            !complete_socks5_connect(upstream, requested_atyp, requested_host, requested_port, error)) {
+            close_socket(upstream);
+            upstream = kInvalidSocket;
+            return false;
+        }
     }
-    upstream = connect_tcp(config.fixed_host, config.fixed_port, error);
-    if (upstream == kInvalidSocket) {
-        return false;
-    }
-    if (config.target_type == ServerConfig::TargetType::Raw) {
-        return true;
-    }
-    if (!complete_socks5_connect(upstream, requested_atyp, requested_host, requested_port, error)) {
+
+    std::string nonblocking_error;
+    if (!set_socket_nonblocking(upstream, true, nonblocking_error)) {
+        error = nonblocking_error;
         close_socket(upstream);
         upstream = kInvalidSocket;
         return false;
@@ -352,6 +379,8 @@ private:
     struct UpstreamStream {
         std::uint32_t id = 0;
         socket_t sock = kInvalidSocket;
+        std::vector<std::uint8_t> pending_uplink;
+        std::size_t pending_uplink_offset = 0;
     };
 
     struct DownlinkFrame {
@@ -381,6 +410,7 @@ private:
     bool initialize();
     void handle_http1_connection();
     bool flush_session();
+    bool flush_upstream_socket(UpstreamStream& stream, std::string& error);
     void loop();
     void handle_request(int32_t stream_id);
     void handle_upload_frames(RequestState& request);
@@ -419,10 +449,12 @@ private:
     int32_t event_stream_id_ = -1;
     bool tunnel_opened_ = false;
     bool running_ = true;
+    EventNotifier loop_notifier_;
 };
 
 Http2ServerConnection::~Http2ServerConnection() {
     close_all_upstreams();
+    loop_notifier_.close();
     if (h2_ != nullptr) {
         nghttp2_session_del(h2_);
         h2_ = nullptr;
@@ -432,6 +464,11 @@ Http2ServerConnection::~Http2ServerConnection() {
 }
 
 void Http2ServerConnection::run() {
+    std::string notifier_error;
+    if (!loop_notifier_.open(notifier_error)) {
+        PROXY_LOG(Error, "[server] 初始化事件唤醒器失败: " << notifier_error);
+        return;
+    }
     if (!tls_.accept_server(accepted_socket_, config_.cert_file, config_.key_file)) {
         PROXY_LOG(Error, "[server] TLS 握手失败: " << tls_.last_error());
         return;
@@ -510,18 +547,56 @@ bool Http2ServerConnection::flush_session() {
     }
 }
 
-void Http2ServerConnection::loop() {
-    while (running_) {
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(tls_.raw_socket(), &readfds);
-        socket_t maxfd = tls_.raw_socket();
+bool Http2ServerConnection::flush_upstream_socket(UpstreamStream& stream, std::string& error) {
+    while (stream.pending_uplink_offset < stream.pending_uplink.size()) {
+        const auto* data = stream.pending_uplink.data() + stream.pending_uplink_offset;
+        const std::size_t remaining = stream.pending_uplink.size() - stream.pending_uplink_offset;
+#ifdef _WIN32
+        const int ret = ::send(stream.sock, reinterpret_cast<const char*>(data), static_cast<int>(remaining), 0);
+#else
+        const int ret = static_cast<int>(::send(stream.sock, data, remaining, 0));
+#endif
+        if (ret > 0) {
+            stream.pending_uplink_offset += static_cast<std::size_t>(ret);
+            continue;
+        }
 
+        const int code = proxy::last_socket_error_code();
+        if (ret < 0 && is_socket_would_block(code)) {
+            break;
+        }
+
+        error = "上游 socket send 失败: " + proxy::socket_error_string();
+        return false;
+    }
+
+    if (stream.pending_uplink_offset >= stream.pending_uplink.size()) {
+        stream.pending_uplink.clear();
+        stream.pending_uplink_offset = 0;
+    } else if (stream.pending_uplink_offset >= kTunnelIoChunkSize) {
+        stream.pending_uplink.erase(
+            stream.pending_uplink.begin(),
+            stream.pending_uplink.begin() + static_cast<std::ptrdiff_t>(stream.pending_uplink_offset));
+        stream.pending_uplink_offset = 0;
+    }
+
+    return true;
+}
+
+void Http2ServerConnection::loop() {
+    EventDispatcher dispatcher;
+    if (!dispatcher.valid()) {
+        PROXY_LOG(Error, "[server] 初始化事件分发器失败");
+        running_ = false;
+        return;
+    }
+    std::map<socket_t, std::pair<bool, bool>> watched;
+    while (running_) {
+        std::map<socket_t, std::pair<bool, bool>> desired;
+        desired[tls_.raw_socket()] = {true, false};
+        desired[loop_notifier_.readable_socket()] = {true, false};
         for (const auto& kv : streams_) {
-            FD_SET(kv.second.sock, &readfds);
-            if (kv.second.sock > maxfd) {
-                maxfd = kv.second.sock;
-            }
+            desired[kv.second.sock] = {true, kv.second.pending_uplink_offset < kv.second.pending_uplink.size()};
         }
 
         if ((!downlink_control_.empty() || !downlink_data_.empty()) && event_stream_id_ >= 0) {
@@ -532,46 +607,106 @@ void Http2ServerConnection::loop() {
             }
         }
 
-        timeval tv{};
-        tv.tv_usec = kTunnelPollIntervalUsec;
-        const int ready = ::select(static_cast<int>(maxfd + 1), &readfds, nullptr, nullptr, &tv);
-        if (ready < 0) {
-            continue;
+        std::string dispatcher_error;
+        for (auto it = watched.begin(); it != watched.end();) {
+            if (desired.find(it->first) == desired.end()) {
+                dispatcher.remove(it->first, dispatcher_error);
+                it = watched.erase(it);
+                continue;
+            }
+            ++it;
+        }
+        for (const auto& kv : desired) {
+            const auto it = watched.find(kv.first);
+            if (it == watched.end() || it->second != kv.second) {
+                if (!dispatcher.set(kv.first, kv.second.first, kv.second.second, dispatcher_error)) {
+                    PROXY_LOG(Error, "[server] 更新事件关注失败: " << dispatcher_error);
+                    running_ = false;
+                    break;
+                }
+                watched[kv.first] = kv.second;
+            }
+        }
+        if (!running_) {
+            break;
         }
 
-        if (ready > 0 && FD_ISSET(tls_.raw_socket(), &readfds)) {
-            std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
-            const int ret = tls_.read(buf.data(), buf.size());
-            if (ret <= 0) {
-                break;
-            }
-            const auto consumed = nghttp2_session_mem_recv2(h2_, buf.data(), static_cast<size_t>(ret));
-            if (consumed < 0) {
-                PROXY_LOG(Error, "[server] nghttp2_session_mem_recv2 失败: "
-                                    << nghttp2_strerror(static_cast<int>(consumed)));
-                break;
-            }
-            if (!flush_session()) {
-                break;
-            }
+        std::vector<SocketEvent> events;
+        const int ready = dispatcher.wait(events, -1, dispatcher_error);
+        if (ready < 0) {
+            PROXY_LOG(Error, "[server] 等待事件失败: " << dispatcher_error);
+            running_ = false;
+            break;
         }
 
         std::vector<std::uint32_t> to_close;
-        for (const auto& kv : streams_) {
-            if (!FD_ISSET(kv.second.sock, &readfds)) {
+        for (const auto& event : events) {
+            if (event.sock == loop_notifier_.readable_socket()) {
+                loop_notifier_.drain();
+                continue;
+            }
+
+            if (event.sock == tls_.raw_socket()) {
+                if (!event.readable && !event.error && !event.hangup) {
+                    continue;
+                }
+                std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
+                const int ret = tls_.read(buf.data(), buf.size());
+                if (ret <= 0) {
+                    running_ = false;
+                    break;
+                }
+                const auto consumed = nghttp2_session_mem_recv2(h2_, buf.data(), static_cast<size_t>(ret));
+                if (consumed < 0) {
+                    PROXY_LOG(Error, "[server] nghttp2_session_mem_recv2 失败: "
+                                        << nghttp2_strerror(static_cast<int>(consumed)));
+                    running_ = false;
+                    break;
+                }
+                if (!flush_session()) {
+                    running_ = false;
+                    break;
+                }
+                continue;
+            }
+
+            auto stream_it = std::find_if(streams_.begin(), streams_.end(), [&](const auto& item) {
+                return item.second.sock == event.sock;
+            });
+            if (stream_it == streams_.end()) {
+                continue;
+            }
+
+            auto& stream = stream_it->second;
+            if ((event.error || event.hangup) && !event.readable && !event.writable) {
+                to_close.push_back(stream_it->first);
+                continue;
+            }
+            if (event.writable) {
+                std::string error;
+                if (!flush_upstream_socket(stream, error)) {
+                    PROXY_LOG(Debug, "[server] 上游刷新失败 stream=" << stream.id << " error=" << error);
+                    to_close.push_back(stream_it->first);
+                    continue;
+                }
+            }
+            if (!event.readable) {
                 continue;
             }
             std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
 #ifdef _WIN32
-            const int ret = ::recv(kv.second.sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
+            const int ret = ::recv(stream.sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
 #else
-            const int ret = static_cast<int>(::recv(kv.second.sock, buf.data(), buf.size(), 0));
+            const int ret = static_cast<int>(::recv(stream.sock, buf.data(), buf.size(), 0));
 #endif
-            if (ret <= 0) {
-                to_close.push_back(kv.first);
+            if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) {
                 continue;
             }
-            enqueue_downlink(FrameType::Data, kv.first,
+            if (ret <= 0) {
+                to_close.push_back(stream_it->first);
+                continue;
+            }
+            enqueue_downlink(FrameType::Data, stream_it->first,
                              std::vector<std::uint8_t>(buf.begin(), buf.begin() + ret));
         }
         for (const auto stream_id : to_close) {
@@ -621,6 +756,7 @@ void Http2ServerConnection::enqueue_downlink(FrameType type, std::uint32_t strea
     if (event_stream_id_ >= 0) {
         nghttp2_session_resume_data(h2_, event_stream_id_);
     }
+    signal_notifier(loop_notifier_, "server", "downlink");
 }
 
 void Http2ServerConnection::purge_downlink_data_for_stream(std::uint32_t stream_id) {
@@ -658,6 +794,7 @@ void Http2ServerConnection::close_logical_stream(std::uint32_t stream_id, bool n
     if (notify_client) {
         enqueue_downlink(FrameType::Close, stream_id, {});
     }
+    signal_notifier(loop_notifier_, "server", "loop");
 }
 
 void Http2ServerConnection::close_all_upstreams() {
@@ -768,6 +905,7 @@ void Http2ServerConnection::handle_request(int32_t stream_id) {
     if (request.method == "POST" && request.path == "/api/tunnel/close") {
         submit_static_response(stream_id, 200, "text/plain", to_bytes("closed"));
         running_ = false;
+        signal_notifier(loop_notifier_, "server", "loop");
         return;
     }
 
@@ -815,6 +953,7 @@ void Http2ServerConnection::handle_upload_frames(RequestState& request) {
             PROXY_LOG(Info, "[server] Open 成功 stream=" << tunnel_stream_id
                                                          << " requested=" << requested_host << ":" << requested_port);
             enqueue_downlink(FrameType::OpenOk, tunnel_stream_id, encode_open_ok());
+            signal_notifier(loop_notifier_, "server", "loop");
         } else if (type == FrameType::Data) {
             const auto stream_it = streams_.find(tunnel_stream_id);
             if (stream_it == streams_.end()) {
@@ -822,11 +961,15 @@ void Http2ServerConnection::handle_upload_frames(RequestState& request) {
                                                                   << " bytes=" << item.second.size());
                 continue;
             }
+            auto& stream = stream_it->second;
+            stream.pending_uplink.insert(stream.pending_uplink.end(), item.second.begin(), item.second.end());
             std::string error;
-            if (!send_all_raw(stream_it->second.sock, item.second.data(), item.second.size(), error)) {
+            if (!flush_upstream_socket(stream, error)) {
                 PROXY_LOG(Debug, "[server] 上游发送失败 stream=" << tunnel_stream_id << " error=" << error);
                 close_logical_stream(tunnel_stream_id, true);
+                continue;
             }
+            signal_notifier(loop_notifier_, "server", "loop");
         } else if (type == FrameType::Close) {
             PROXY_LOG(Debug, "[server] 收到客户端 Close stream=" << tunnel_stream_id);
             close_logical_stream(tunnel_stream_id, false);

@@ -9,6 +9,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
@@ -37,7 +38,6 @@
 namespace {
 
 constexpr std::size_t kTunnelIoChunkSize = 256 * 1024;
-constexpr long kTunnelPollIntervalUsec = 5000;
 constexpr std::int32_t kHttp2WindowSize = 16 * 1024 * 1024;
 constexpr std::uint32_t kHttp2MaxFrameSize = 1024 * 1024;
 constexpr std::size_t kMaxBufferedDownlinkBytes = 32 * 1024 * 1024;
@@ -46,6 +46,8 @@ using proxy::close_socket;
 using proxy::consume_frames;
 using proxy::decode_open_fail;
 using proxy::encode_open_request;
+using proxy::EventDispatcher;
+using proxy::EventNotifier;
 using proxy::FrameHeader;
 using proxy::FrameType;
 using proxy::kInvalidSocket;
@@ -56,6 +58,7 @@ using proxy::send_socks5_reply;
 using proxy::send_all_raw;
 using proxy::set_log_level;
 using proxy::select_http2_padded_length;
+using proxy::SocketEvent;
 using proxy::socket_t;
 using proxy::LogLevel;
 using proxy::Socks5HandshakeStatus;
@@ -185,6 +188,13 @@ bool is_socket_would_block(int code) {
 #else
     return code == EAGAIN || code == EWOULDBLOCK;
 #endif
+}
+
+void signal_notifier(EventNotifier& notifier, const char* owner, const char* action) {
+    std::string error;
+    if (!notifier.signal(error) && !error.empty()) {
+        PROXY_LOG(Debug, "[" << owner << "] " << action << " 唤醒失败: " << error);
+    }
 }
 
 std::uint8_t detect_atyp_from_host(const std::string& host) {
@@ -539,12 +549,16 @@ private:
 
     int32_t event_stream_id_ = -1;
     int32_t upload_stream_id_ = -1;
+    EventNotifier io_notifier_;
+    EventNotifier local_loop_notifier_;
 };
 
 ClientRuntime::~ClientRuntime() {
     const bool was_running = running_.exchange(false);
     upload_cv_.notify_all();
     upload_resume_needed_ = true;
+    signal_notifier(io_notifier_, "client", "IO");
+    signal_notifier(local_loop_notifier_, "client", "local-loop");
     if (was_running) {
         int ignored_status = 0;
         submit_request_sync("POST", "/api/tunnel/close", {}, "text/plain",
@@ -554,6 +568,8 @@ ClientRuntime::~ClientRuntime() {
     if (io_thread_.joinable()) {
         io_thread_.join();
     }
+    io_notifier_.close();
+    local_loop_notifier_.close();
     close_all_streams();
     if (h2_ != nullptr) {
         nghttp2_session_del(h2_);
@@ -592,6 +608,7 @@ bool ClientRuntime::submit_request_sync(const std::string& method, const std::st
         std::lock_guard<std::mutex> lock(requests_mutex_);
         pending_requests_.push_back(request);
     }
+    signal_notifier(io_notifier_, "client", "request");
 
     std::unique_lock<std::mutex> lock(request->mutex);
     const bool completed = request->cv.wait_for(lock, std::chrono::seconds(15), [&] {
@@ -643,6 +660,7 @@ bool ClientRuntime::start_upload_stream() {
         std::lock_guard<std::mutex> lock(requests_mutex_);
         pending_requests_.push_back(request);
     }
+    signal_notifier(io_notifier_, "client", "upload-request");
 
     std::unique_lock<std::mutex> lock(request->mutex);
     const bool completed = request->cv.wait_for(lock, std::chrono::seconds(15), [&] {
@@ -678,15 +696,24 @@ bool ClientRuntime::start() {
         io_error_ = "本地监听未初始化";
         return false;
     }
+    std::string notifier_error;
+    if (!io_notifier_.open(notifier_error) || !local_loop_notifier_.open(notifier_error)) {
+        io_error_ = notifier_error.empty() ? "初始化事件唤醒器失败" : notifier_error;
+        running_ = false;
+        return false;
+    }
     PROXY_LOG(Info, "[client] 正在连接 " << cfg_.server_host << ":" << cfg_.server_port << " ...");
     io_thread_ = std::thread(&ClientRuntime::io_loop, this);
     if (!wait_for_io_ready()) {
         PROXY_LOG(Error, "[client] HTTP/2 初始化失败: " << io_error_);
         running_ = false;
+        signal_notifier(local_loop_notifier_, "client", "local-loop");
         tls_.shutdown();
         if (io_thread_.joinable()) {
             io_thread_.join();
         }
+        io_notifier_.close();
+        local_loop_notifier_.close();
         return false;
     }
 
@@ -698,10 +725,13 @@ bool ClientRuntime::start() {
         PROXY_LOG(Error, "[client] 打开隧道失败: "
                             << (io_error_.empty() ? ("HTTP " + std::to_string(open_status)) : io_error_));
         running_ = false;
+        signal_notifier(local_loop_notifier_, "client", "local-loop");
         tls_.shutdown();
         if (io_thread_.joinable()) {
             io_thread_.join();
         }
+        io_notifier_.close();
+        local_loop_notifier_.close();
         return false;
     }
 
@@ -709,10 +739,13 @@ bool ClientRuntime::start() {
     if (!start_event_stream()) {
         PROXY_LOG(Error, "[client] 启动事件流失败: " << io_error_);
         running_ = false;
+        signal_notifier(local_loop_notifier_, "client", "local-loop");
         tls_.shutdown();
         if (io_thread_.joinable()) {
             io_thread_.join();
         }
+        io_notifier_.close();
+        local_loop_notifier_.close();
         return false;
     }
 
@@ -720,10 +753,13 @@ bool ClientRuntime::start() {
     if (!start_upload_stream()) {
         PROXY_LOG(Error, "[client] 启动 upload stream 失败: " << io_error_);
         running_ = false;
+        signal_notifier(local_loop_notifier_, "client", "local-loop");
         tls_.shutdown();
         if (io_thread_.joinable()) {
             io_thread_.join();
         }
+        io_notifier_.close();
+        local_loop_notifier_.close();
         return false;
     }
     PROXY_LOG(Info, "[client] HTTP/2 TLS 连接已建立到 " << cfg_.server_host << ":" << cfg_.server_port);
@@ -795,6 +831,18 @@ void ClientRuntime::io_loop() {
     io_ok_ = true;
     io_ready_ = true;
 
+    EventDispatcher dispatcher;
+    if (!dispatcher.valid()) {
+        finish_with_error("初始化 HTTP/2 事件分发器失败");
+        return;
+    }
+    std::string dispatcher_error;
+    if (!dispatcher.set(tls_.raw_socket(), true, false, dispatcher_error) ||
+        !dispatcher.set(io_notifier_.readable_socket(), true, false, dispatcher_error)) {
+        finish_with_error(dispatcher_error);
+        return;
+    }
+
     while (running_) {
         if (upload_stream_id_ >= 0 && upload_resume_needed_.exchange(false)) {
             nghttp2_session_resume_data(h2_, upload_stream_id_);
@@ -807,13 +855,24 @@ void ClientRuntime::io_loop() {
 
         process_request_queue();
 
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(tls_.raw_socket(), &readfds);
-        timeval tv{};
-        tv.tv_usec = kTunnelPollIntervalUsec;
-        const int ready = ::select(static_cast<int>(tls_.raw_socket() + 1), &readfds, nullptr, nullptr, &tv);
-        if (ready > 0 && FD_ISSET(tls_.raw_socket(), &readfds)) {
+        std::vector<SocketEvent> events;
+        const int ready = dispatcher.wait(events, -1, dispatcher_error);
+        if (ready < 0) {
+            io_error_ = dispatcher_error;
+            running_ = false;
+            break;
+        }
+        for (const auto& event : events) {
+            if (event.sock == io_notifier_.readable_socket()) {
+                io_notifier_.drain();
+                continue;
+            }
+            if (event.sock != tls_.raw_socket()) {
+                continue;
+            }
+            if (!event.readable && !event.error && !event.hangup) {
+                continue;
+            }
             std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
             const int ret = tls_.read(buf.data(), buf.size());
             if (ret <= 0) {
@@ -858,18 +917,21 @@ void ClientRuntime::io_loop() {
         req->error = io_error_.empty() ? "HTTP/2 会话已结束" : io_error_;
         req->cv.notify_all();
     }
+    signal_notifier(local_loop_notifier_, "client", "local-loop");
     } catch (const std::exception& ex) {
         io_error_ = std::string("io_loop 未捕获异常: ") + ex.what();
         PROXY_LOG(Error, "[client] " << io_error_);
         io_ok_ = false;
         io_ready_ = true;
         running_ = false;
+        signal_notifier(local_loop_notifier_, "client", "local-loop");
     } catch (...) {
         io_error_ = "io_loop 未捕获未知异常";
         PROXY_LOG(Error, "[client] " << io_error_);
         io_ok_ = false;
         io_ready_ = true;
         running_ = false;
+        signal_notifier(local_loop_notifier_, "client", "local-loop");
     }
 }
 
@@ -1127,6 +1189,7 @@ void ClientRuntime::queue_frame(FrameType type, std::uint32_t stream_id, const s
         proxy::append_frame(upload_buffer_, type, stream_id, payload);
     }
     upload_resume_needed_ = true;
+    signal_notifier(io_notifier_, "client", "upload");
 }
 
 void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
@@ -1202,6 +1265,8 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
                 PROXY_LOG(Debug, "[client] 本地下行缓冲过大，关闭流 stream=" << stream_id
                                                                     << " buffered=" << buffered_bytes);
                 close_stream(stream_id, true);
+            } else {
+                signal_notifier(local_loop_notifier_, "client", "downlink");
             }
         } else if (type == FrameType::Close) {
             PROXY_LOG(Debug, "[client] 收到远端 Close stream=" << stream_id);
@@ -1212,13 +1277,17 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
 
 void ClientRuntime::accept_and_pump_loop() {
     try {
+    EventDispatcher dispatcher;
+    if (!dispatcher.valid()) {
+        io_error_ = "初始化本地事件分发器失败";
+        running_ = false;
+        return;
+    }
+    std::map<socket_t, std::pair<bool, bool>> watched;
     while (running_) {
-        fd_set readfds;
-        fd_set writefds;
-        FD_ZERO(&readfds);
-        FD_ZERO(&writefds);
-        FD_SET(listener_, &readfds);
-        socket_t maxfd = listener_;
+        std::map<socket_t, std::pair<bool, bool>> desired;
+        desired[listener_] = {true, false};
+        desired[local_loop_notifier_.readable_socket()] = {true, false};
 
         std::vector<std::shared_ptr<LocalStream>> snapshot;
         {
@@ -1238,43 +1307,73 @@ void ClientRuntime::accept_and_pump_loop() {
                 sock = stream->sock;
                 wants_write = stream->pending_downlink_offset < stream->pending_downlink.size();
             }
-            FD_SET(sock, &readfds);
-            if (wants_write) {
-                FD_SET(sock, &writefds);
+            desired[sock] = {true, wants_write};
+        }
+
+        std::string dispatcher_error;
+        for (auto it = watched.begin(); it != watched.end();) {
+            if (desired.find(it->first) == desired.end()) {
+                dispatcher.remove(it->first, dispatcher_error);
+                it = watched.erase(it);
+                continue;
             }
-            if (sock > maxfd) {
-                maxfd = sock;
+            ++it;
+        }
+        for (const auto& kv : desired) {
+            const auto it = watched.find(kv.first);
+            if (it == watched.end() || it->second != kv.second) {
+                if (!dispatcher.set(kv.first, kv.second.first, kv.second.second, dispatcher_error)) {
+                    io_error_ = dispatcher_error;
+                    running_ = false;
+                    return;
+                }
+                watched[kv.first] = kv.second;
             }
         }
 
-        timeval tv{};
-        tv.tv_sec = 1;
-        const int ready = ::select(static_cast<int>(maxfd + 1), &readfds, &writefds, nullptr, &tv);
+        std::vector<SocketEvent> events;
+        const int ready = dispatcher.wait(events, -1, dispatcher_error);
         if (ready < 0) {
-            continue;
+            io_error_ = dispatcher_error;
+            running_ = false;
+            return;
         }
-        if (FD_ISSET(listener_, &readfds)) {
-            accept_one();
-        }
-        for (const auto& stream : snapshot) {
-            socket_t sock = kInvalidSocket;
-            {
+
+        for (const auto& event : events) {
+            if (event.sock == local_loop_notifier_.readable_socket()) {
+                local_loop_notifier_.drain();
+                continue;
+            }
+            if (event.sock == listener_ && event.readable) {
+                accept_one();
+                continue;
+            }
+
+            std::shared_ptr<LocalStream> target;
+            for (const auto& stream : snapshot) {
                 std::lock_guard<std::mutex> lock(stream->mutex);
-                if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
-                    continue;
+                if (stream->state == LocalStream::State::Open && stream->sock == event.sock) {
+                    target = stream;
+                    break;
                 }
-                sock = stream->sock;
             }
-            if (FD_ISSET(sock, &writefds) && is_stream_active(stream->id)) {
+            if (!target || !is_stream_active(target->id)) {
+                continue;
+            }
+            if ((event.error || event.hangup) && !event.writable) {
+                close_stream(target->id, true);
+                continue;
+            }
+            if (event.writable) {
                 std::string error;
-                if (!flush_local_socket(stream, error)) {
-                    PROXY_LOG(Debug, "[client] 刷新本地下行失败 stream=" << stream->id << " error=" << error);
-                    close_stream(stream->id, true);
+                if (!flush_local_socket(target, error)) {
+                    PROXY_LOG(Debug, "[client] 刷新本地下行失败 stream=" << target->id << " error=" << error);
+                    close_stream(target->id, true);
                     continue;
                 }
             }
-            if (FD_ISSET(sock, &readfds) && is_stream_active(stream->id)) {
-                pump_local_socket(stream);
+            if (event.readable && is_stream_active(target->id)) {
+                pump_local_socket(target);
             }
         }
     }
@@ -1496,6 +1595,7 @@ void ClientRuntime::close_stream(std::uint32_t id, bool notify_remote) {
     }
     close_socket(sock);
     stream->cv.notify_all();
+    signal_notifier(local_loop_notifier_, "client", "local-loop");
 }
 
 void ClientRuntime::close_all_streams() {

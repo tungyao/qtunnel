@@ -1,15 +1,20 @@
 #pragma once
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <chrono>
+#include <atomic>
+#include <array>
 #include <vector>
 
 #ifdef _WIN32
@@ -20,6 +25,9 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
+#ifdef __linux__
+#include <sys/epoll.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -232,20 +240,345 @@ inline bool set_socket_nonblocking(socket_t sock, bool enabled, std::string& err
 #endif
 }
 
+struct SocketEvent {
+    socket_t sock = kInvalidSocket;
+    bool readable = false;
+    bool writable = false;
+    bool error = false;
+    bool hangup = false;
+};
+
+class EventDispatcher {
+public:
+    EventDispatcher()
+#ifdef __linux__
+        : epoll_fd_(::epoll_create1(EPOLL_CLOEXEC))
+#endif
+    {}
+
+    ~EventDispatcher() {
+#ifdef __linux__
+        if (epoll_fd_ >= 0) {
+            ::close(epoll_fd_);
+            epoll_fd_ = -1;
+        }
+#endif
+    }
+
+    bool valid() const {
+#ifdef __linux__
+        return epoll_fd_ >= 0;
+#else
+        return true;
+#endif
+    }
+
+    bool set(socket_t sock, bool want_read, bool want_write, std::string& error) {
+        if (sock == kInvalidSocket) {
+            error = "无效 socket";
+            return false;
+        }
+#ifdef __linux__
+        epoll_event ev{};
+        ev.events = EPOLLERR | EPOLLHUP;
+        if (want_read) {
+            ev.events |= EPOLLIN | EPOLLRDHUP;
+        }
+        if (want_write) {
+            ev.events |= EPOLLOUT;
+        }
+        ev.data.fd = sock;
+        const auto it = interests_.find(sock);
+        const int op = (it == interests_.end()) ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
+        if (::epoll_ctl(epoll_fd_, op, sock, &ev) != 0) {
+            error = "epoll_ctl 失败: " + socket_error_string();
+            return false;
+        }
+        interests_[sock] = Interest{want_read, want_write};
+        return true;
+#else
+        pollfds_[sock].fd = sock;
+        pollfds_[sock].events = static_cast<short>((want_read ? POLLRDNORM : 0) |
+                                                   (want_write ? POLLWRNORM : 0));
+        pollfds_[sock].revents = 0;
+        return true;
+#endif
+    }
+
+    bool remove(socket_t sock, std::string& error) {
+        (void)error;
+        if (sock == kInvalidSocket) {
+            return true;
+        }
+#ifdef __linux__
+        interests_.erase(sock);
+        if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, sock, nullptr) != 0) {
+            const int code = errno;
+            if (code != ENOENT && code != EBADF) {
+                error = "epoll_ctl 删除失败: " + socket_error_string();
+                return false;
+            }
+        }
+        return true;
+#else
+        pollfds_.erase(sock);
+        return true;
+#endif
+    }
+
+    int wait(std::vector<SocketEvent>& events, int timeout_ms, std::string& error) {
+        events.clear();
+#ifdef __linux__
+        std::array<epoll_event, 128> ready{};
+        const int ready_count = ::epoll_wait(epoll_fd_, ready.data(), static_cast<int>(ready.size()), timeout_ms);
+        if (ready_count < 0) {
+            if (errno == EINTR) {
+                return 0;
+            }
+            error = "epoll_wait 失败: " + socket_error_string();
+            return -1;
+        }
+        events.reserve(static_cast<std::size_t>(ready_count));
+        for (int i = 0; i < ready_count; ++i) {
+            const std::uint32_t mask = ready[static_cast<std::size_t>(i)].events;
+            events.push_back(SocketEvent{
+                static_cast<socket_t>(ready[static_cast<std::size_t>(i)].data.fd),
+                (mask & (EPOLLIN | EPOLLPRI | EPOLLRDHUP)) != 0,
+                (mask & EPOLLOUT) != 0,
+                (mask & EPOLLERR) != 0,
+                (mask & (EPOLLHUP | EPOLLRDHUP)) != 0,
+            });
+        }
+        return ready_count;
+#else
+        if (pollfds_.empty()) {
+            if (timeout_ms > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+            }
+            return 0;
+        }
+
+        std::vector<WSAPOLLFD> fds;
+        fds.reserve(pollfds_.size());
+        for (const auto& kv : pollfds_) {
+            fds.push_back(kv.second);
+        }
+
+        const int ready_count = ::WSAPoll(fds.data(), static_cast<ULONG>(fds.size()), timeout_ms);
+        if (ready_count < 0) {
+            error = "WSAPoll 失败: " + socket_error_string();
+            return -1;
+        }
+
+        events.reserve(static_cast<std::size_t>(ready_count));
+        for (const auto& fd : fds) {
+            if (fd.revents == 0) {
+                continue;
+            }
+            events.push_back(SocketEvent{
+                fd.fd,
+                (fd.revents & (POLLRDNORM | POLLRDBAND | POLLIN | POLLHUP)) != 0,
+                (fd.revents & (POLLWRNORM | POLLOUT)) != 0,
+                (fd.revents & POLLERR) != 0,
+                (fd.revents & POLLHUP) != 0,
+            });
+        }
+        return ready_count;
+#endif
+    }
+
+private:
+    struct Interest {
+        bool want_read = false;
+        bool want_write = false;
+    };
+
+#ifdef __linux__
+    int epoll_fd_ = -1;
+    std::map<socket_t, Interest> interests_;
+#else
+    std::map<socket_t, WSAPOLLFD> pollfds_;
+#endif
+};
+
+class EventNotifier {
+public:
+    EventNotifier() = default;
+    ~EventNotifier() {
+        close();
+    }
+
+    bool open(std::string& error) {
+        close();
+#ifdef _WIN32
+        socket_t listener = static_cast<socket_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+        if (listener == kInvalidSocket) {
+            error = "创建唤醒 listener 失败: " + socket_error_string();
+            return false;
+        }
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (::bind(listener, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+            error = "绑定唤醒 listener 失败: " + socket_error_string();
+            close_socket(listener);
+            return false;
+        }
+        if (::listen(listener, 1) != 0) {
+            error = "监听唤醒 listener 失败: " + socket_error_string();
+            close_socket(listener);
+            return false;
+        }
+
+        sockaddr_in bound{};
+        int bound_len = sizeof(bound);
+        if (::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &bound_len) != 0) {
+            error = "获取唤醒 listener 地址失败: " + socket_error_string();
+            close_socket(listener);
+            return false;
+        }
+
+        socket_t writer = static_cast<socket_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+        if (writer == kInvalidSocket) {
+            error = "创建唤醒 writer 失败: " + socket_error_string();
+            close_socket(listener);
+            return false;
+        }
+        if (::connect(writer, reinterpret_cast<const sockaddr*>(&bound), sizeof(bound)) != 0) {
+            error = "连接唤醒 writer 失败: " + socket_error_string();
+            close_socket(writer);
+            close_socket(listener);
+            return false;
+        }
+
+        socket_t reader = ::accept(listener, nullptr, nullptr);
+        if (reader == kInvalidSocket) {
+            error = "接受唤醒 reader 失败: " + socket_error_string();
+            close_socket(writer);
+            close_socket(listener);
+            return false;
+        }
+        close_socket(listener);
+        std::string nonblocking_error;
+        if (!set_socket_nonblocking(reader, true, nonblocking_error) ||
+            !set_socket_nonblocking(writer, true, nonblocking_error)) {
+            error = nonblocking_error;
+            close_socket(reader);
+            close_socket(writer);
+            return false;
+        }
+        reader_ = reader;
+        writer_ = writer;
+#else
+        int fds[2] = {-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            error = "创建唤醒 socketpair 失败: " + socket_error_string();
+            return false;
+        }
+        reader_ = fds[0];
+        writer_ = fds[1];
+        std::string nonblocking_error;
+        if (!set_socket_nonblocking(reader_, true, nonblocking_error) ||
+            !set_socket_nonblocking(writer_, true, nonblocking_error)) {
+            error = nonblocking_error;
+            close();
+            return false;
+        }
+#endif
+        signaled_.store(false);
+        return true;
+    }
+
+    void close() {
+        signaled_.store(false);
+        close_socket(reader_);
+        close_socket(writer_);
+        reader_ = kInvalidSocket;
+        writer_ = kInvalidSocket;
+    }
+
+    socket_t readable_socket() const {
+        return reader_;
+    }
+
+    bool signal(std::string& error) {
+        if (reader_ == kInvalidSocket || writer_ == kInvalidSocket) {
+            error = "唤醒器未初始化";
+            return false;
+        }
+
+        bool expected = false;
+        if (!signaled_.compare_exchange_strong(expected, true)) {
+            return true;
+        }
+
+        const std::uint8_t byte = 1;
+#ifdef _WIN32
+        const int ret = ::send(writer_, reinterpret_cast<const char*>(&byte), 1, 0);
+#else
+        const int ret = static_cast<int>(::send(writer_, &byte, 1, 0));
+#endif
+        if (ret == 1) {
+            return true;
+        }
+
+        const int code = last_socket_error_code();
+#ifdef _WIN32
+        if (code == WSAEWOULDBLOCK) {
+#else
+        if (code == EAGAIN || code == EWOULDBLOCK) {
+#endif
+            return true;
+        }
+        signaled_.store(false);
+        error = "发送唤醒信号失败: " + socket_error_string();
+        return false;
+    }
+
+    void drain() {
+        if (reader_ == kInvalidSocket) {
+            return;
+        }
+        std::array<std::uint8_t, 128> buf{};
+        while (true) {
+#ifdef _WIN32
+            const int ret = ::recv(reader_, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
+#else
+            const int ret = static_cast<int>(::recv(reader_, buf.data(), buf.size(), 0));
+#endif
+            if (ret > 0) {
+                continue;
+            }
+            break;
+        }
+        signaled_.store(false);
+    }
+
+private:
+    socket_t reader_ = kInvalidSocket;
+    socket_t writer_ = kInvalidSocket;
+    std::atomic<bool> signaled_{false};
+};
+
 inline bool wait_socket_writable(socket_t sock, int timeout_ms, std::string& error) {
-    fd_set writefds;
-    FD_ZERO(&writefds);
-    FD_SET(sock, &writefds);
-    timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    const int ready = ::select(static_cast<int>(sock + 1), nullptr, &writefds, nullptr, &tv);
+    EventDispatcher dispatcher;
+    if (!dispatcher.valid()) {
+        error = "初始化事件分发器失败";
+        return false;
+    }
+    if (!dispatcher.set(sock, false, true, error)) {
+        return false;
+    }
+
+    std::vector<SocketEvent> events;
+    const int ready = dispatcher.wait(events, timeout_ms, error);
     if (ready == 0) {
         error = "连接超时";
         return false;
     }
     if (ready < 0) {
-        error = "select 等待连接完成失败: " + socket_error_string();
         return false;
     }
     int so_error = 0;
