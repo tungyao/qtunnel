@@ -526,7 +526,11 @@ public:
             return true;
         }
 
-        const int code = last_socket_error_code();
+ #ifdef _WIN32
+        const int code = WSAGetLastError();
+ #else
+        const int code = errno;
+ #endif
 #ifdef _WIN32
         if (code == WSAEWOULDBLOCK) {
 #else
