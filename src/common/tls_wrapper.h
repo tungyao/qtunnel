@@ -18,9 +18,9 @@
 #include <vector>
 
 #ifdef _WIN32
-#include <mstcpip.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
