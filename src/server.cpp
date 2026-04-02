@@ -18,6 +18,8 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -37,6 +39,7 @@
 namespace {
 
 constexpr std::size_t kTunnelIoChunkSize = 256 * 1024;
+constexpr std::size_t kSessionFlushBudgetBytes = 256 * 1024;
 constexpr std::int32_t kHttp2WindowSize = 16 * 1024 * 1024;
 constexpr std::uint32_t kHttp2MaxFrameSize = 1024 * 1024;
 
@@ -390,6 +393,14 @@ private:
         std::size_t offset = 0;
     };
 
+    struct PendingConnectResult {
+        std::uint32_t stream_id = 0;
+        socket_t sock = kInvalidSocket;
+        std::string requested_host;
+        std::uint16_t requested_port = 0;
+        std::string error;
+    };
+
     struct RequestState {
         enum class ResponseMode {
             None,
@@ -410,7 +421,14 @@ private:
     bool initialize();
     void handle_http1_connection();
     bool flush_session();
+    bool flush_session_budgeted(std::size_t budget_bytes);
     bool flush_upstream_socket(UpstreamStream& stream, std::string& error);
+    void start_upstream_connect(std::uint32_t stream_id, std::uint8_t atyp,
+                                const std::string& requested_host, std::uint16_t requested_port);
+    void process_pending_connect_results();
+    void join_connector_threads();
+    bool has_pending_downlink_data() const;
+    DownlinkFrame* current_downlink_data_frame();
     void loop();
     void handle_request(int32_t stream_id);
     void handle_upload_frames(RequestState& request);
@@ -445,7 +463,12 @@ private:
     std::map<int32_t, RequestState> requests_;
     std::map<std::uint32_t, UpstreamStream> streams_;
     std::deque<DownlinkFrame> downlink_control_;
-    std::deque<DownlinkFrame> downlink_data_;
+    std::map<std::uint32_t, std::deque<DownlinkFrame>> downlink_data_by_stream_;
+    std::deque<std::uint32_t> downlink_data_round_robin_;
+    std::mutex pending_connects_mutex_;
+    std::deque<PendingConnectResult> pending_connect_results_;
+    std::set<std::uint32_t> connecting_streams_;
+    std::vector<std::thread> connector_threads_;
     int32_t event_stream_id_ = -1;
     bool tunnel_opened_ = false;
     bool running_ = true;
@@ -454,6 +477,7 @@ private:
 
 Http2ServerConnection::~Http2ServerConnection() {
     close_all_upstreams();
+    join_connector_threads();
     loop_notifier_.close();
     if (h2_ != nullptr) {
         nghttp2_session_del(h2_);
@@ -547,6 +571,25 @@ bool Http2ServerConnection::flush_session() {
     }
 }
 
+bool Http2ServerConnection::flush_session_budgeted(std::size_t budget_bytes) {
+    std::size_t sent = 0;
+    while (sent < budget_bytes) {
+        const uint8_t* data = nullptr;
+        const auto len = nghttp2_session_mem_send2(h2_, &data);
+        if (len < 0) {
+            return false;
+        }
+        if (len == 0) {
+            return true;
+        }
+        if (!tls_.write_all(data, static_cast<std::size_t>(len))) {
+            return false;
+        }
+        sent += static_cast<std::size_t>(len);
+    }
+    return true;
+}
+
 bool Http2ServerConnection::flush_upstream_socket(UpstreamStream& stream, std::string& error) {
     while (stream.pending_uplink_offset < stream.pending_uplink.size()) {
         const auto* data = stream.pending_uplink.data() + stream.pending_uplink_offset;
@@ -583,6 +626,91 @@ bool Http2ServerConnection::flush_upstream_socket(UpstreamStream& stream, std::s
     return true;
 }
 
+void Http2ServerConnection::start_upstream_connect(std::uint32_t stream_id, std::uint8_t atyp,
+                                                   const std::string& requested_host, std::uint16_t requested_port) {
+    const ServerConfig config = config_;
+    connecting_streams_.insert(stream_id);
+    connector_threads_.emplace_back([this, config, stream_id, atyp, requested_host, requested_port]() {
+        PendingConnectResult result;
+        result.stream_id = stream_id;
+        result.requested_host = requested_host;
+        result.requested_port = requested_port;
+        result.sock = kInvalidSocket;
+        if (!open_upstream_channel(config, atyp, requested_host, requested_port, result.sock, result.error)) {
+            result.sock = kInvalidSocket;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(pending_connects_mutex_);
+            pending_connect_results_.push_back(std::move(result));
+        }
+        signal_notifier(loop_notifier_, "server", "connect-result");
+    });
+}
+
+void Http2ServerConnection::process_pending_connect_results() {
+    std::deque<PendingConnectResult> completed;
+    {
+        std::lock_guard<std::mutex> lock(pending_connects_mutex_);
+        completed.swap(pending_connect_results_);
+    }
+
+    for (auto& result : completed) {
+        const auto connecting_it = connecting_streams_.find(result.stream_id);
+        if (connecting_it == connecting_streams_.end()) {
+            if (result.sock != kInvalidSocket) {
+                close_socket(result.sock);
+            }
+            continue;
+        }
+        connecting_streams_.erase(connecting_it);
+
+        if (result.sock == kInvalidSocket) {
+            PROXY_LOG(Warn, "[server] Open 失败 stream=" << result.stream_id
+                                                         << " requested=" << result.requested_host << ":"
+                                                         << result.requested_port
+                                                         << " error=" << result.error);
+            enqueue_downlink(FrameType::OpenFail, result.stream_id, encode_open_fail(result.error));
+            continue;
+        }
+
+        streams_[result.stream_id] = UpstreamStream{result.stream_id, result.sock};
+        PROXY_LOG(Info, "[server] Open 成功 stream=" << result.stream_id
+                                                     << " requested=" << result.requested_host << ":"
+                                                     << result.requested_port);
+        enqueue_downlink(FrameType::OpenOk, result.stream_id, encode_open_ok());
+    }
+}
+
+void Http2ServerConnection::join_connector_threads() {
+    for (auto& thread : connector_threads_) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    connector_threads_.clear();
+}
+
+bool Http2ServerConnection::has_pending_downlink_data() const {
+    return !downlink_data_round_robin_.empty();
+}
+
+Http2ServerConnection::DownlinkFrame* Http2ServerConnection::current_downlink_data_frame() {
+    while (!downlink_data_round_robin_.empty()) {
+        const std::uint32_t stream_id = downlink_data_round_robin_.front();
+        const auto stream_it = downlink_data_by_stream_.find(stream_id);
+        if (stream_it == downlink_data_by_stream_.end() || stream_it->second.empty()) {
+            downlink_data_round_robin_.pop_front();
+            if (stream_it != downlink_data_by_stream_.end() && stream_it->second.empty()) {
+                downlink_data_by_stream_.erase(stream_it);
+            }
+            continue;
+        }
+        return &stream_it->second.front();
+    }
+    return nullptr;
+}
+
 void Http2ServerConnection::loop() {
     EventDispatcher dispatcher;
     if (!dispatcher.valid()) {
@@ -592,6 +720,7 @@ void Http2ServerConnection::loop() {
     }
     std::map<socket_t, std::pair<bool, bool>> watched;
     while (running_) {
+        process_pending_connect_results();
         std::map<socket_t, std::pair<bool, bool>> desired;
         desired[tls_.raw_socket()] = {true, false};
         desired[loop_notifier_.readable_socket()] = {true, false};
@@ -599,11 +728,14 @@ void Http2ServerConnection::loop() {
             desired[kv.second.sock] = {true, kv.second.pending_uplink_offset < kv.second.pending_uplink.size()};
         }
 
-        if ((!downlink_control_.empty() || !downlink_data_.empty()) && event_stream_id_ >= 0) {
+        if ((!downlink_control_.empty() || has_pending_downlink_data()) && event_stream_id_ >= 0) {
             nghttp2_session_resume_data(h2_, event_stream_id_);
-            if (!flush_session()) {
+            if (!flush_session_budgeted(kSessionFlushBudgetBytes)) {
                 running_ = false;
                 break;
+            }
+            if (!downlink_control_.empty() || has_pending_downlink_data()) {
+                signal_notifier(loop_notifier_, "server", "downlink-continue");
             }
         }
 
@@ -643,6 +775,7 @@ void Http2ServerConnection::loop() {
         for (const auto& event : events) {
             if (event.sock == loop_notifier_.readable_socket()) {
                 loop_notifier_.drain();
+                process_pending_connect_results();
                 continue;
             }
 
@@ -747,12 +880,19 @@ void Http2ServerConnection::submit_static_response(int32_t stream_id, int status
 
 void Http2ServerConnection::enqueue_downlink(FrameType type, std::uint32_t stream_id,
                                              const std::vector<std::uint8_t>& payload) {
-    auto& queue = (type == FrameType::Data) ? downlink_data_ : downlink_control_;
     DownlinkFrame frame;
     frame.type = type;
     frame.stream_id = stream_id;
     proxy::append_frame(frame.encoded, type, stream_id, payload);
-    queue.push_back(std::move(frame));
+    if (type == FrameType::Data) {
+        auto& stream_queue = downlink_data_by_stream_[stream_id];
+        if (stream_queue.empty()) {
+            downlink_data_round_robin_.push_back(stream_id);
+        }
+        stream_queue.push_back(std::move(frame));
+    } else {
+        downlink_control_.push_back(std::move(frame));
+    }
     if (event_stream_id_ >= 0) {
         nghttp2_session_resume_data(h2_, event_stream_id_);
     }
@@ -762,16 +902,22 @@ void Http2ServerConnection::enqueue_downlink(FrameType type, std::uint32_t strea
 void Http2ServerConnection::purge_downlink_data_for_stream(std::uint32_t stream_id) {
     std::size_t dropped_frames = 0;
     std::size_t dropped_bytes = 0;
-    for (auto it = downlink_data_.begin(); it != downlink_data_.end();) {
-        if (it->type == FrameType::Data && it->stream_id == stream_id) {
+    const auto it = downlink_data_by_stream_.find(stream_id);
+    if (it != downlink_data_by_stream_.end()) {
+        for (const auto& frame : it->second) {
             ++dropped_frames;
-            if (it->encoded.size() > it->offset) {
-                dropped_bytes += it->encoded.size() - it->offset;
+            if (frame.encoded.size() > frame.offset) {
+                dropped_bytes += frame.encoded.size() - frame.offset;
             }
-            it = downlink_data_.erase(it);
+        }
+        downlink_data_by_stream_.erase(it);
+    }
+    for (auto rr_it = downlink_data_round_robin_.begin(); rr_it != downlink_data_round_robin_.end();) {
+        if (*rr_it == stream_id) {
+            rr_it = downlink_data_round_robin_.erase(rr_it);
             continue;
         }
-        ++it;
+        ++rr_it;
     }
 
     if (dropped_frames > 0) {
@@ -782,8 +928,13 @@ void Http2ServerConnection::purge_downlink_data_for_stream(std::uint32_t stream_
 }
 
 void Http2ServerConnection::close_logical_stream(std::uint32_t stream_id, bool notify_client) {
+    connecting_streams_.erase(stream_id);
     const auto it = streams_.find(stream_id);
     if (it == streams_.end()) {
+        if (notify_client) {
+            enqueue_downlink(FrameType::Close, stream_id, {});
+        }
+        signal_notifier(loop_notifier_, "server", "loop");
         return;
     }
     PROXY_LOG(Debug, "[server] 关闭上游流 stream=" << stream_id
@@ -798,10 +949,13 @@ void Http2ServerConnection::close_logical_stream(std::uint32_t stream_id, bool n
 }
 
 void Http2ServerConnection::close_all_upstreams() {
+    connecting_streams_.clear();
     for (auto& kv : streams_) {
         close_socket(kv.second.sock);
     }
     streams_.clear();
+    downlink_data_by_stream_.clear();
+    downlink_data_round_robin_.clear();
 }
 
 std::string Http2ServerConnection::get_header_value_ci(const RequestState& request, const std::string& name) const {
@@ -939,26 +1093,27 @@ void Http2ServerConnection::handle_upload_frames(RequestState& request) {
                                                          << describe_upstream_route(config_, requested_host,
                                                                                     requested_port));
 
-            std::string error;
-            socket_t upstream = kInvalidSocket;
-            if (!open_upstream_channel(config_, atyp, requested_host, requested_port, upstream, error)) {
-                PROXY_LOG(Warn, "[server] Open 失败 stream=" << tunnel_stream_id
-                                                             << " requested=" << requested_host << ":" << requested_port
-                                                             << " error=" << error);
-                enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail(error));
+            if (streams_.find(tunnel_stream_id) != streams_.end() ||
+                connecting_streams_.find(tunnel_stream_id) != connecting_streams_.end()) {
+                PROXY_LOG(Warn, "[server] Open 重复 stream=" << tunnel_stream_id);
+                enqueue_downlink(FrameType::OpenFail, tunnel_stream_id, encode_open_fail("stream already exists"));
                 continue;
             }
-
-            streams_[tunnel_stream_id] = UpstreamStream{tunnel_stream_id, upstream};
-            PROXY_LOG(Info, "[server] Open 成功 stream=" << tunnel_stream_id
-                                                         << " requested=" << requested_host << ":" << requested_port);
-            enqueue_downlink(FrameType::OpenOk, tunnel_stream_id, encode_open_ok());
+            start_upstream_connect(tunnel_stream_id, atyp, requested_host, requested_port);
+            PROXY_LOG(Debug, "[server] Open 异步连接已启动 stream=" << tunnel_stream_id
+                                                                   << " requested=" << requested_host << ":"
+                                                                   << requested_port);
             signal_notifier(loop_notifier_, "server", "loop");
         } else if (type == FrameType::Data) {
             const auto stream_it = streams_.find(tunnel_stream_id);
             if (stream_it == streams_.end()) {
-                PROXY_LOG(Debug, "[server] 丢弃未知流数据 stream=" << tunnel_stream_id
-                                                                  << " bytes=" << item.second.size());
+                if (connecting_streams_.find(tunnel_stream_id) != connecting_streams_.end()) {
+                    PROXY_LOG(Debug, "[server] 上游尚未建立，暂不接收 stream=" << tunnel_stream_id
+                                                                            << " bytes=" << item.second.size());
+                } else {
+                    PROXY_LOG(Debug, "[server] 丢弃未知流数据 stream=" << tunnel_stream_id
+                                                                      << " bytes=" << item.second.size());
+                }
                 continue;
             }
             auto& stream = stream_it->second;
@@ -988,8 +1143,8 @@ nghttp2_ssize Http2ServerConnection::read_response_body(nghttp2_session* /*sessi
         DownlinkFrame* active_frame = nullptr;
         if (!self->downlink_control_.empty()) {
             active_frame = &self->downlink_control_.front();
-        } else if (!self->downlink_data_.empty()) {
-            active_frame = &self->downlink_data_.front();
+        } else {
+            active_frame = self->current_downlink_data_frame();
         }
 
         if (active_frame == nullptr) {
@@ -1007,12 +1162,27 @@ nghttp2_ssize Http2ServerConnection::read_response_body(nghttp2_session* /*sessi
         if (active_frame->offset >= active_frame->encoded.size()) {
             if (!self->downlink_control_.empty()) {
                 self->downlink_control_.pop_front();
-            } else if (!self->downlink_data_.empty()) {
-                self->downlink_data_.pop_front();
+            } else if (!self->downlink_data_round_robin_.empty()) {
+                const std::uint32_t stream_id = self->downlink_data_round_robin_.front();
+                auto stream_it = self->downlink_data_by_stream_.find(stream_id);
+                if (stream_it != self->downlink_data_by_stream_.end() && !stream_it->second.empty()) {
+                    stream_it->second.pop_front();
+                    self->downlink_data_round_robin_.pop_front();
+                    if (!stream_it->second.empty()) {
+                        self->downlink_data_round_robin_.push_back(stream_id);
+                    } else {
+                        self->downlink_data_by_stream_.erase(stream_it);
+                    }
+                } else {
+                    self->downlink_data_round_robin_.pop_front();
+                    if (stream_it != self->downlink_data_by_stream_.end()) {
+                        self->downlink_data_by_stream_.erase(stream_it);
+                    }
+                }
             }
-            if (!self->running_ && self->downlink_control_.empty() && self->downlink_data_.empty()) {
+            if (!self->running_ && self->downlink_control_.empty() && !self->has_pending_downlink_data()) {
                 *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-            } else if (!self->downlink_control_.empty() || !self->downlink_data_.empty()) {
+            } else if (!self->downlink_control_.empty() || self->has_pending_downlink_data()) {
                 nghttp2_session_resume_data(self->h2_, self->event_stream_id_);
             }
         }

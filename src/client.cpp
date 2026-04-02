@@ -449,7 +449,9 @@ private:
         std::uint32_t id = 0;
         socket_t sock = kInvalidSocket;
         enum class State { Pending, Open, Failed, Closed } state = State::Pending;
+        LocalProxyProtocol protocol = LocalProxyProtocol::Socks5;
         std::string error;
+        std::vector<std::uint8_t> initial_payload;
         std::vector<std::uint8_t> pending_downlink;
         std::size_t pending_downlink_offset = 0;
         std::mutex mutex;
@@ -537,8 +539,10 @@ private:
 
     std::mutex upload_mutex_;
     std::condition_variable upload_cv_;
-    std::vector<std::uint8_t> upload_buffer_;
-    std::size_t upload_buffer_offset_ = 0;
+    std::vector<std::uint8_t> upload_control_buffer_;
+    std::size_t upload_control_buffer_offset_ = 0;
+    std::vector<std::uint8_t> upload_data_buffer_;
+    std::size_t upload_data_buffer_offset_ = 0;
     std::atomic<bool> upload_resume_needed_{false};
     std::shared_ptr<RequestState> upload_request_;
 
@@ -1007,7 +1011,19 @@ nghttp2_ssize ClientRuntime::read_request_body(nghttp2_session* /*session*/, int
     auto* request = static_cast<RequestState*>(source->ptr);
     if (request->body_mode == RequestState::BodyMode::Streaming) {
         std::lock_guard<std::mutex> lock(self->upload_mutex_);
-        const std::size_t available = self->upload_buffer_.size() - self->upload_buffer_offset_;
+        std::vector<std::uint8_t>* active_buffer = nullptr;
+        std::size_t* active_offset = nullptr;
+        if (self->upload_control_buffer_offset_ < self->upload_control_buffer_.size()) {
+            active_buffer = &self->upload_control_buffer_;
+            active_offset = &self->upload_control_buffer_offset_;
+        } else if (self->upload_data_buffer_offset_ < self->upload_data_buffer_.size()) {
+            active_buffer = &self->upload_data_buffer_;
+            active_offset = &self->upload_data_buffer_offset_;
+        }
+
+        const std::size_t available = (active_buffer == nullptr || active_offset == nullptr)
+            ? 0
+            : (active_buffer->size() - *active_offset);
         if (available == 0) {
             if (!self->running_) {
                 *data_flags |= NGHTTP2_DATA_FLAG_EOF;
@@ -1017,16 +1033,16 @@ nghttp2_ssize ClientRuntime::read_request_body(nghttp2_session* /*session*/, int
         }
 
         const std::size_t copy_len = available < length ? available : length;
-        std::memcpy(buf, self->upload_buffer_.data() + self->upload_buffer_offset_, copy_len);
-        self->upload_buffer_offset_ += copy_len;
+        std::memcpy(buf, active_buffer->data() + *active_offset, copy_len);
+        *active_offset += copy_len;
 
-        if (self->upload_buffer_offset_ == self->upload_buffer_.size()) {
-            self->upload_buffer_.clear();
-            self->upload_buffer_offset_ = 0;
-        } else if (self->upload_buffer_offset_ >= kTunnelIoChunkSize) {
-            self->upload_buffer_.erase(self->upload_buffer_.begin(),
-                                       self->upload_buffer_.begin() + static_cast<std::ptrdiff_t>(self->upload_buffer_offset_));
-            self->upload_buffer_offset_ = 0;
+        if (*active_offset == active_buffer->size()) {
+            active_buffer->clear();
+            *active_offset = 0;
+        } else if (*active_offset >= kTunnelIoChunkSize) {
+            active_buffer->erase(active_buffer->begin(),
+                                 active_buffer->begin() + static_cast<std::ptrdiff_t>(*active_offset));
+            *active_offset = 0;
         }
         return static_cast<nghttp2_ssize>(copy_len);
     }
@@ -1186,7 +1202,8 @@ nghttp2_ssize ClientRuntime::select_padding(nghttp2_session* /*session*/, const 
 void ClientRuntime::queue_frame(FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload) {
     {
         std::lock_guard<std::mutex> lock(upload_mutex_);
-        proxy::append_frame(upload_buffer_, type, stream_id, payload);
+        auto& target = (type == FrameType::Data) ? upload_data_buffer_ : upload_control_buffer_;
+        proxy::append_frame(target, type, stream_id, payload);
     }
     upload_resume_needed_ = true;
     signal_notifier(io_notifier_, "client", "upload");
@@ -1223,11 +1240,42 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
                 continue;
             }
             PROXY_LOG(Info, "[client] 收到 OpenOk stream=" << stream_id);
+            LocalProxyProtocol protocol = LocalProxyProtocol::Socks5;
+            std::vector<std::uint8_t> initial_payload;
+            socket_t sock = kInvalidSocket;
             {
                 std::lock_guard<std::mutex> lock(stream->mutex);
                 stream->state = LocalStream::State::Open;
+                protocol = stream->protocol;
+                initial_payload = stream->initial_payload;
+                stream->initial_payload.clear();
+                sock = stream->sock;
             }
             stream->cv.notify_all();
+            if (!initial_payload.empty()) {
+                PROXY_LOG(Debug, "[client] 发送初始请求负载 stream=" << stream_id
+                                                                    << " bytes=" << initial_payload.size());
+                queue_frame(FrameType::Data, stream_id, initial_payload);
+            }
+            if (protocol == LocalProxyProtocol::Socks5) {
+                if (!send_socks5_reply(sock, 0x00)) {
+                    close_stream(stream_id, true);
+                    continue;
+                }
+                PROXY_LOG(Debug, "[client] 已发送 SOCKS5 成功响应 stream=" << stream_id);
+            } else if (protocol == LocalProxyProtocol::HttpConnect) {
+                if (!send_http_proxy_response(sock, 200, "Connection Established")) {
+                    close_stream(stream_id, true);
+                    continue;
+                }
+                PROXY_LOG(Debug, "[client] 已发送 HTTP CONNECT 200 stream=" << stream_id);
+            }
+            std::string nonblocking_error;
+            if (!proxy::set_socket_nonblocking(sock, true, nonblocking_error)) {
+                PROXY_LOG(Warn, "[client] 设置本地流为非阻塞失败 stream=" << stream_id
+                                                                           << " error=" << nonblocking_error);
+            }
+            signal_notifier(local_loop_notifier_, "client", "open-ok");
         } else if (type == FrameType::OpenFail) {
             if (!stream) {
                 continue;
@@ -1235,12 +1283,25 @@ void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
             std::string reason;
             decode_open_fail(item.second, reason);
             PROXY_LOG(Warn, "[client] 收到 OpenFail stream=" << stream_id << " reason=" << reason);
+            LocalProxyProtocol protocol = LocalProxyProtocol::Socks5;
+            socket_t sock = kInvalidSocket;
             {
                 std::lock_guard<std::mutex> lock(stream->mutex);
                 stream->state = LocalStream::State::Failed;
                 stream->error = reason;
+                protocol = stream->protocol;
+                sock = stream->sock;
             }
             stream->cv.notify_all();
+            if (protocol == LocalProxyProtocol::Socks5) {
+                send_socks5_reply(sock, 0x05);
+            } else if (protocol == LocalProxyProtocol::HttpConnect ||
+                       protocol == LocalProxyProtocol::HttpForward) {
+                send_http_proxy_response(sock, 502, "Bad Gateway",
+                                         reason.empty() ? "open remote stream failed" : reason);
+            }
+            close_stream(stream_id, false);
+            signal_notifier(local_loop_notifier_, "client", "open-fail");
         } else if (type == FrameType::Data) {
             if (!stream) {
                 PROXY_LOG(Debug, "[client] 丢弃未知流下行数据 stream=" << stream_id
@@ -1456,6 +1517,8 @@ void ClientRuntime::accept_one() {
     auto stream = std::make_shared<LocalStream>();
     stream->id = next_stream_id_++;
     stream->sock = sock;
+    stream->protocol = accepted.protocol;
+    stream->initial_payload = std::move(accepted.initial_payload);
     {
         std::lock_guard<std::mutex> lock(streams_mutex_);
         streams_[stream->id] = stream;
@@ -1470,67 +1533,7 @@ void ClientRuntime::accept_one() {
                                                                                                                : "http")));
 
     queue_frame(FrameType::Open, stream->id, encode_open_request(accepted.target));
-    PROXY_LOG(Debug, "[client] 已发送 Open 帧，等待远端确认 stream=" << stream->id);
-    bool open_succeeded = false;
-    {
-        std::unique_lock<std::mutex> lock(stream->mutex);
-        stream->cv.wait(lock, [&] {
-            return stream->state == LocalStream::State::Open ||
-                   stream->state == LocalStream::State::Failed ||
-                   !running_;
-        });
-        open_succeeded = stream->state == LocalStream::State::Open;
-        PROXY_LOG(Debug, "[client] 等待 Open 结束 stream=" << stream->id
-                                                            << " state="
-                                                            << (stream->state == LocalStream::State::Open ? "open" :
-                                                                (stream->state == LocalStream::State::Failed ? "failed" :
-                                                                 (stream->state == LocalStream::State::Closed ? "closed"
-                                                                                                             : "pending")))
-                                                            << (stream->error.empty() ? "" : " error=" + stream->error));
-    }
-
-    if (!open_succeeded) {
-        PROXY_LOG(Warn, "[client] 打开远端流失败 stream=" << stream->id
-                                                           << " target=" << describe_socks5_target(accepted.target)
-                                                           << (stream->error.empty() ? "" : " error=" + stream->error));
-        if (stream->state == LocalStream::State::Failed &&
-            accepted.protocol == LocalProxyProtocol::Socks5) {
-            send_socks5_reply(sock, 0x05);
-        } else if (accepted.protocol == LocalProxyProtocol::HttpConnect ||
-                   accepted.protocol == LocalProxyProtocol::HttpForward) {
-            send_http_proxy_response(sock, 502, "Bad Gateway",
-                                     stream->error.empty() ? "open remote stream failed" : stream->error);
-        }
-        close_stream(stream->id, false);
-        return;
-    }
-
-    PROXY_LOG(Info, "[client] 远端流已打开 stream=" << stream->id
-                                                   << " target=" << describe_socks5_target(accepted.target));
-    if (!accepted.initial_payload.empty()) {
-        PROXY_LOG(Debug, "[client] 发送初始请求负载 stream=" << stream->id
-                                                            << " bytes=" << accepted.initial_payload.size());
-        queue_frame(FrameType::Data, stream->id, accepted.initial_payload);
-    }
-    if (accepted.protocol == LocalProxyProtocol::Socks5) {
-        if (!send_socks5_reply(sock, 0x00)) {
-            close_stream(stream->id, true);
-            return;
-        }
-        PROXY_LOG(Debug, "[client] 已发送 SOCKS5 成功响应 stream=" << stream->id);
-    } else if (accepted.protocol == LocalProxyProtocol::HttpConnect) {
-        if (!send_http_proxy_response(sock, 200, "Connection Established")) {
-            close_stream(stream->id, true);
-            return;
-        }
-        PROXY_LOG(Debug, "[client] 已发送 HTTP CONNECT 200 stream=" << stream->id);
-    }
-
-    std::string nonblocking_error;
-    if (!proxy::set_socket_nonblocking(sock, true, nonblocking_error)) {
-        PROXY_LOG(Warn, "[client] 设置本地流为非阻塞失败 stream=" << stream->id
-                                                                   << " error=" << nonblocking_error);
-    }
+    PROXY_LOG(Debug, "[client] 已发送 Open 帧，异步等待远端确认 stream=" << stream->id);
 }
 
 void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream) {
