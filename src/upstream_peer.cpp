@@ -422,18 +422,27 @@ bool process_read(Peer& peer) {
             if (ret > 0) {
                 block->used = static_cast<std::size_t>(ret);
                 peer.pending_downlink.push(block);
-            } else if (ret <= 0) {
-                // EOF or error - release the unused block
+            } else if (ret == 0) {
+                // EOF - release the unused block and return
                 if (peer.pending_downlink.pool) {
                     peer.pending_downlink.pool->release(block);
                 }
-                return ret == 0 ? false : false;  // EOF or error
-            } else if (is_socket_would_block(proxy::last_socket_error_code())) {
-                // Would block - release the unused block and break
-                if (peer.pending_downlink.pool) {
-                    peer.pending_downlink.pool->release(block);
+                return false;  // Connection closed
+            } else {
+                // ret < 0 - error
+                if (is_socket_would_block(proxy::last_socket_error_code())) {
+                    // Would block - release the unused block and break
+                    if (peer.pending_downlink.pool) {
+                        peer.pending_downlink.pool->release(block);
+                    }
+                    break;
+                } else {
+                    // Real error - release and return
+                    if (peer.pending_downlink.pool) {
+                        peer.pending_downlink.pool->release(block);
+                    }
+                    return false;  // Fatal error
                 }
-                break;
             }
         } else {
             // No pool available - shouldn't happen since buffer_pool is always provided
