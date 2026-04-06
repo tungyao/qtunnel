@@ -1,0 +1,64 @@
+====== qtunnel Test Results ======
+Timestamp: Mon Apr  6 15:53:31 CST 2026
+
+TEST 1: Concurrent Light Requests
+  Parallel connections: 50
+  Success: 50
+  Failed: 0
+  Success rate: 100.00%
+  Duration: 2668223ms
+  Throughput: .01 req/sec
+
+TEST 2: Big File + Concurrent Requests
+  Big file size: 10000000 bytes
+  Big file duration: 1s
+  Big file speed: 0 bytes/sec
+  Concurrent requests: 30
+  Success: 0
+  Failed: 30
+  Success rate: 0%
+  Duration: 1272ms
+
+SERVER LOG (last 20 lines):
+[info] [server] conn_id=1 stream=91 upstream EOF
+[info] [server] conn_id=1 read 56 bytes from client, total=56
+[info] [server] conn_id=1 read 23 bytes from client, total=23
+[info] [server] conn_id=1 stream=99 upstream EOF
+[info] [server] conn_id=1 stream=5 upstream EOF
+[info] [server] conn_id=1 stream=7 upstream EOF
+[info] [server] conn_id=1 stream=3 upstream EOF
+[info] [server] conn_id=1 stream=13 upstream EOF
+[info] [server] conn_id=1 stream=17 upstream EOF
+[info] [server] conn_id=1 stream=15 upstream EOF
+[info] [server] conn_id=1 stream=19 upstream EOF
+[info] [server] conn_id=1 stream=9 upstream EOF
+[info] [server] conn_id=1 stream=23 upstream EOF
+[info] [server] conn_id=1 stream=21 upstream EOF
+[info] [server] conn_id=1 stream=27 upstream EOF
+[info] [server] conn_id=1 stream=11 upstream EOF
+[info] [server] conn_id=1 stream=33 upstream EOF
+[info] [server] conn_id=1 stream=31 upstream EOF
+[info] [server] conn_id=1 stream=35 upstream EOF
+[info] [server] conn_id=1 stream=29 upstream EOF
+
+CLIENT LOG (last 20 lines):
+[info] [client] 新建本地连接 target=52.6.211.202:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=44.218.58.97:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=54.172.102.128:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=52.6.211.202:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=52.71.170.232:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=52.6.211.202:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=54.172.102.128:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=54.172.102.128:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=52.71.108.149:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=52.6.211.202:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers

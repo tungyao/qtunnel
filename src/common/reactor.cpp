@@ -64,7 +64,7 @@ bool Reactor::add(socket_t fd, EventFlags events, std::string& error) {
     poll_fds_.push_back({wsa_pfd, fd});
     return true;
 #else
-    std::uint32_t epoll_events = 0;
+    std::uint32_t epoll_events = EPOLLET | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
     if ((events & EventFlags::Readable) != EventFlags::None) {
         epoll_events |= EPOLLIN;
     }
@@ -74,7 +74,7 @@ bool Reactor::add(socket_t fd, EventFlags events, std::string& error) {
 
     epoll_event ev{};
     ev.events = epoll_events;
-    ev.data.u32 = static_cast<std::uint32_t>(fd);
+    ev.data.fd = fd;
 
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
         error = "epoll_ctl(ADD) failed for fd " + std::to_string(fd) + ": " + strerror(errno);
@@ -108,7 +108,7 @@ bool Reactor::modify(socket_t fd, EventFlags events, std::string& error) {
     poll_fds_.push_back({wsa_pfd, fd});
     return true;
 #else
-    std::uint32_t epoll_events = 0;
+    std::uint32_t epoll_events = EPOLLET | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
     if ((events & EventFlags::Readable) != EventFlags::None) {
         epoll_events |= EPOLLIN;
     }
@@ -118,7 +118,7 @@ bool Reactor::modify(socket_t fd, EventFlags events, std::string& error) {
 
     epoll_event ev{};
     ev.events = epoll_events;
-    ev.data.u32 = static_cast<std::uint32_t>(fd);
+    ev.data.fd = fd;
 
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) < 0) {
         error = "epoll_ctl(MOD) failed for fd " + std::to_string(fd) + ": " + strerror(errno);
@@ -214,7 +214,7 @@ socket_t Reactor::ready_fd(int index) const {
     return kInvalidSocket;
 #else
     if (index >= 0 && index < ready_count_) {
-        return static_cast<socket_t>(epoll_events_[index].data.u32);
+        return epoll_events_[index].data.fd;
     }
     return kInvalidSocket;
 #endif
@@ -225,7 +225,7 @@ EventFlags Reactor::ready_events(int index) const {
     if (index >= 0 && index < ready_count_) {
         const short revents = poll_fds_[index].pollfd.revents;
         EventFlags flags = EventFlags::None;
-        if (revents & (POLLIN | POLLHUP)) {
+        if (revents & (POLLIN | POLLHUP | POLLERR)) {
             flags = flags | EventFlags::Readable;
         }
         if (revents & POLLOUT) {
@@ -238,7 +238,7 @@ EventFlags Reactor::ready_events(int index) const {
     if (index >= 0 && index < ready_count_) {
         const std::uint32_t ev = epoll_events_[index].events;
         EventFlags flags = EventFlags::None;
-        if (ev & (EPOLLIN | EPOLLHUP | EPOLLRDHUP)) {
+        if (ev & (EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLERR)) {
             flags = flags | EventFlags::Readable;
         }
         if (ev & EPOLLOUT) {

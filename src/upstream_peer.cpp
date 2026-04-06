@@ -388,19 +388,24 @@ bool process_read(Peer& peer) {
         return true;
     }
 
-    // Open state: read into ChunkQueue
+    // Open state: read into ChunkQueue (ET mode: loop until EAGAIN)
     std::array<uint8_t, kTunnelIoChunkSize> buf{};
+    while (true) {
 #ifdef _WIN32
-    const int ret = ::recv(peer.sock,
-                           reinterpret_cast<char*>(buf.data()),
-                           static_cast<int>(buf.size()), 0);
+        const int ret = ::recv(peer.sock,
+                               reinterpret_cast<char*>(buf.data()),
+                               static_cast<int>(buf.size()), 0);
 #else
-    const int ret = static_cast<int>(::recv(peer.sock, buf.data(), buf.size(), 0));
+        const int ret = static_cast<int>(::recv(peer.sock, buf.data(), buf.size(), 0));
 #endif
-    if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) return true;
-    if (ret <= 0) return false;
-    peer.pending_downlink.push(
-        std::vector<uint8_t>(buf.begin(), buf.begin() + ret));
+        if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) {
+            // Would block - no more data available (ET mode)
+            break;
+        }
+        if (ret <= 0) return false;  // EOF or error
+        peer.pending_downlink.push(
+            std::vector<uint8_t>(buf.begin(), buf.begin() + ret));
+    }
     return true;
 }
 

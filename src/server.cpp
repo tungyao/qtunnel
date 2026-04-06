@@ -11,6 +11,8 @@
 #include <string>
 #include <unordered_map>
 #include <atomic>
+#include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -20,6 +22,9 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -35,6 +40,15 @@ using proxy::set_socket_nonblocking;
 using proxy::socket_t;
 
 std::atomic<std::uint64_t> g_connection_id{0};
+
+#ifndef _WIN32
+std::atomic<bool> g_sigchld_received{false};
+
+void sigchld_handler(int sig) {
+    (void)sig;
+    g_sigchld_received = true;
+}
+#endif
 
 std::string format_client_addr(sockaddr_storage* ss) {
     char buf[128] = {};
@@ -82,6 +96,10 @@ socket_t make_listener(std::uint16_t port) {
 
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+#ifdef SO_REUSEPORT
+    // Allow multiple processes to bind to the same port (for multi-worker model)
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<const char*>(&yes), sizeof(yes));
+#endif
 #ifdef IPV6_V6ONLY
     int no = 0;
     setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&no), sizeof(no));
@@ -265,6 +283,8 @@ ServerConfig parse_args(int argc, char** argv) {
         else if (arg == "--log-level" && i + 1 < argc) {
             LogLevel level = LogLevel::Info;
             if (parse_log_level(argv[++i], level)) cfg.log_level = level;
+        } else if (arg == "--workers" && i + 1 < argc) {
+            cfg.worker_count = std::stoi(argv[++i]);
         } else if (arg == "--target" && i + 1 < argc) {
             cfg.has_fixed_target = parse_host_port(argv[++i], cfg.fixed_host, cfg.fixed_port);
             if (cfg.has_fixed_target) cfg.target_type = ServerConfig::TargetType::Socks5;
@@ -284,7 +304,7 @@ ServerConfig parse_args(int argc, char** argv) {
 void print_usage() {
     std::cout << "Usage:\n"
               << "  server [--listen <port>] [--cert-file <cert.pem>] [--key-file <key.pem>] "
-                 "[--target <host:port>] [--target-type direct|socks5|raw]\n"
+                 "[--target <host:port>] [--target-type direct|socks5|raw] [--workers <num>]\n"
               << "  server <host:port>\n";
 }
 
@@ -308,10 +328,71 @@ int main(int argc, char** argv) {
         }
     }
 
-    const ServerConfig config = parse_args(argc, argv);
+    ServerConfig config = parse_args(argc, argv);
     set_log_level(config.log_level);
 
     PROXY_LOG(Info, "server starting log_level=" << proxy::log_level_name(config.log_level));
+
+#ifndef _WIN32
+    // Determine number of workers (default: CPU count)
+    if (config.worker_count <= 0) {
+        config.worker_count = static_cast<int>(std::thread::hardware_concurrency());
+        if (config.worker_count <= 0) config.worker_count = 1;
+    }
+
+    // Master process with multiple workers
+    if (config.worker_count > 1) {
+        std::vector<pid_t> worker_pids;
+
+        // Set up SIGCHLD handler to reap zombie processes
+        signal(SIGCHLD, sigchld_handler);
+        signal(SIGPIPE, SIG_IGN);  // Ignore broken pipe
+
+        PROXY_LOG(Info, "server spawning " << config.worker_count << " worker processes");
+
+        // Fork worker processes
+        for (int i = 0; i < config.worker_count; ++i) {
+            pid_t pid = fork();
+            if (pid < 0) {
+                PROXY_LOG(Error, "fork failed for worker " << i);
+                continue;
+            }
+            if (pid == 0) {
+                // Child process (worker)
+                config.worker_id = i;
+                PROXY_LOG(Info, "worker " << i << " starting (PID=" << getpid() << ")");
+
+                ServerRuntime runtime(config);
+                if (!runtime.init()) return 1;
+
+                PROXY_LOG(Info, "worker " << i << " listening on 0.0.0.0/[::]:" << config.listen_port);
+                runtime.run();
+                return 0;
+            }
+            // Parent process
+            worker_pids.push_back(pid);
+        }
+
+        // Master process: wait for workers and reap zombies
+        PROXY_LOG(Info, "server master process (PID=" << getpid() << ") ready, "
+                      << worker_pids.size() << " workers spawned");
+
+        while (true) {
+            if (g_sigchld_received) {
+                g_sigchld_received = false;
+                int status;
+                while (waitpid(-1, &status, WNOHANG) > 0) {
+                    // Reap zombie processes
+                }
+            }
+            sleep(1);
+        }
+        return 0;
+    }
+#endif
+
+    // Single-process mode
+    PROXY_LOG(Info, "server running in single-process mode");
 
     ServerRuntime runtime(config);
     if (!runtime.init()) return 1;

@@ -1,0 +1,1142 @@
+[info] server starting log_level=info
+[info] server listen 0.0.0.0/[::]:18443
+[info] connect directly to requested upstream
+[info] [server] client connected conn_id=1 from=::ffff:127.0.0.1:41788
+[info] [server] OPENSSL_IS_BORINGSSL: 1
+[info] [server] client registered fd=5 conn_id=1
+[info] [server] conn_id=1 ALPN negotiated: h2, initializing h2_driver
+[info] [h2] session initialized, sending SETTINGS
+[info] [server] conn_id=1 h2 mode, checking for pending data
+[info] [server] conn_id=1 read 24 bytes from client, total=24
+[info] [server] conn_id=1 read 21 bytes from client, total=45
+[info] [server] conn_id=1 read 13 bytes from client, total=58
+[info] [server] conn_id=1 read 9 bytes from client, total=67
+[info] [server] conn_id=1 read 37 bytes from client, total=37
+[info] [h2] on_begin_headers stream=1 cat=0 flags=12 length=28
+[info] [h2] created StreamState for stream=1
+[info] [h2] on_header stream=1 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=1 name=[:authority] value=[185.45.5.35:443] namelen=10 valuelen=15
+[info] [h2] HEADERS frame complete stream=1 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=185.45.5.35:443 headers_count=0
+[info] [h2] handle_connect stream=1
+[info] [h2] stream=1 method=[CONNECT] authority=[185.45.5.35:443] headers_count=0
+[info] [h2] stream=1 CONNECT 185.45.5.35:443
+[info] [server] conn_id=1 CONNECT 185.45.5.35:443 (direct) stream=1
+[info] [upstream] stream=1 connecting to 185.45.5.35:443 use_socks5=no
+[info] [upstream] stream=1 socket=6 connected=no
+[info] [server] conn_id=1 stream=1 upstream sock=6 connected=no state=0
+[info] [upstream] stream=1 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=1 upstream connected
+[info] [server] conn_id=1 read 534 bytes from client, total=534
+[info] [server] conn_id=1 read 101 bytes from client, total=101
+[info] [server] conn_id=1 read 184 bytes from client, total=184
+[info] [server] conn_id=1 read 110 bytes from client, total=294
+[info] [server] conn_id=1 read 54 bytes from client, total=54
+[info] [server] conn_id=1 read 72 bytes from client, total=72
+[info] [server] conn_id=1 read 38 bytes from client, total=38
+[info] [server] conn_id=1 read 38 bytes from client, total=76
+[info] [server] conn_id=1 read 52 bytes from client, total=52
+[info] [h2] on_begin_headers stream=3 cat=0 flags=12 length=43
+[info] [h2] created StreamState for stream=3
+[info] [h2] on_header stream=3 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=3 name=[:authority] value=[3.213.232.221:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=3 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=3.213.232.221:443 headers_count=0
+[info] [h2] handle_connect stream=3
+[info] [h2] stream=3 method=[CONNECT] authority=[3.213.232.221:443] headers_count=0
+[info] [h2] stream=3 CONNECT 3.213.232.221:443
+[info] [server] conn_id=1 CONNECT 3.213.232.221:443 (direct) stream=3
+[info] [upstream] stream=3 connecting to 3.213.232.221:443 use_socks5=no
+[info] [upstream] stream=3 socket=7 connected=no
+[info] [server] conn_id=1 stream=3 upstream sock=7 connected=no state=0
+[info] [upstream] stream=3 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=3 upstream connected
+[info] [server] conn_id=1 read 47 bytes from client, total=47
+[info] [h2] on_begin_headers stream=5 cat=0 flags=12 length=38
+[info] [h2] created StreamState for stream=5
+[info] [h2] on_header stream=5 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=5 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=5 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=5
+[info] [h2] stream=5 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=5 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=5
+[info] [upstream] stream=5 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=5 socket=8 connected=no
+[info] [server] conn_id=1 stream=5 upstream sock=8 connected=no state=0
+[info] [upstream] stream=5 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=5 upstream connected
+[info] [server] conn_id=1 stream=1 upstream EOF
+[info] [server] conn_id=1 read 26 bytes from client, total=26
+[info] [h2] on_begin_headers stream=7 cat=0 flags=12 length=17
+[info] [h2] created StreamState for stream=7
+[info] [h2] on_header stream=7 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=7 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=7 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=7
+[info] [h2] stream=7 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=7 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=7
+[info] [upstream] stream=7 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=7 socket=6 connected=no
+[info] [server] conn_id=1 stream=7 upstream sock=6 connected=no state=0
+[info] [upstream] stream=7 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=7 upstream connected
+[info] [server] conn_id=1 read 552 bytes from client, total=552
+[info] [server] conn_id=1 read 99 bytes from client, total=99
+[info] [h2] on_begin_headers stream=9 cat=0 flags=12 length=90
+[info] [h2] created StreamState for stream=9
+[info] [h2] on_header stream=9 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=9 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=9 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=9
+[info] [h2] stream=9 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=9 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=9
+[info] [upstream] stream=9 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=9 socket=9 connected=no
+[info] [server] conn_id=1 stream=9 upstream sock=9 connected=no state=0
+[info] [server] conn_id=1 read 613 bytes from client, total=712
+[info] [upstream] stream=9 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=9 upstream connected
+[info] [server] conn_id=1 read 47 bytes from client, total=47
+[info] [h2] on_begin_headers stream=11 cat=0 flags=12 length=38
+[info] [h2] created StreamState for stream=11
+[info] [h2] on_header stream=11 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=11 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=11 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=11
+[info] [h2] stream=11 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=11 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=11
+[info] [upstream] stream=11 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=11 socket=10 connected=no
+[info] [server] conn_id=1 stream=11 upstream sock=10 connected=no state=0
+[info] [upstream] stream=11 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=11 upstream connected
+[info] [server] conn_id=1 read 539 bytes from client, total=539
+[info] [server] conn_id=1 read 27 bytes from client, total=27
+[info] [h2] on_begin_headers stream=13 cat=0 flags=12 length=18
+[info] [h2] created StreamState for stream=13
+[info] [h2] on_header stream=13 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=13 name=[:authority] value=[44.218.58.97:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=13 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=44.218.58.97:443 headers_count=0
+[info] [h2] handle_connect stream=13
+[info] [h2] stream=13 method=[CONNECT] authority=[44.218.58.97:443] headers_count=0
+[info] [h2] stream=13 CONNECT 44.218.58.97:443
+[info] [server] conn_id=1 CONNECT 44.218.58.97:443 (direct) stream=13
+[info] [upstream] stream=13 connecting to 44.218.58.97:443 use_socks5=no
+[info] [upstream] stream=13 socket=11 connected=no
+[info] [server] conn_id=1 stream=13 upstream sock=11 connected=no state=0
+[info] [server] conn_id=1 read 542 bytes from client, total=569
+[info] [upstream] stream=13 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=13 upstream connected
+[info] [server] conn_id=1 read 38 bytes from client, total=38
+[info] [h2] on_begin_headers stream=15 cat=0 flags=12 length=29
+[info] [h2] created StreamState for stream=15
+[info] [h2] on_header stream=15 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=15 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=15 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=15
+[info] [h2] stream=15 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=15 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=15
+[info] [upstream] stream=15 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=15 socket=12 connected=no
+[info] [server] conn_id=1 stream=15 upstream sock=12 connected=no state=0
+[info] [upstream] stream=15 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=15 upstream connected
+[info] [server] conn_id=1 read 553 bytes from client, total=553
+[info] [server] conn_id=1 read 20 bytes from client, total=20
+[info] [h2] on_begin_headers stream=17 cat=0 flags=12 length=11
+[info] [h2] created StreamState for stream=17
+[info] [h2] on_header stream=17 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=17 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=17 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=17
+[info] [h2] stream=17 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=17 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=17
+[info] [upstream] stream=17 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=17 socket=13 connected=no
+[info] [server] conn_id=1 stream=17 upstream sock=13 connected=no state=0
+[info] [server] conn_id=1 read 552 bytes from client, total=572
+[info] [upstream] stream=17 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=17 upstream connected
+[info] [server] conn_id=1 read 50 bytes from client, total=50
+[info] [h2] on_begin_headers stream=19 cat=0 flags=12 length=41
+[info] [h2] created StreamState for stream=19
+[info] [h2] on_header stream=19 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=19 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=19 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=19
+[info] [h2] stream=19 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=19 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=19
+[info] [upstream] stream=19 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=19 socket=14 connected=no
+[info] [server] conn_id=1 stream=19 upstream sock=14 connected=no state=0
+[info] [upstream] stream=19 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=19 upstream connected
+[info] [server] conn_id=1 read 537 bytes from client, total=537
+[info] [server] conn_id=1 read 22 bytes from client, total=22
+[info] [h2] on_begin_headers stream=21 cat=0 flags=12 length=13
+[info] [h2] created StreamState for stream=21
+[info] [h2] on_header stream=21 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=21 name=[:authority] value=[3.213.232.221:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=21 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=3.213.232.221:443 headers_count=0
+[info] [h2] handle_connect stream=21
+[info] [h2] stream=21 method=[CONNECT] authority=[3.213.232.221:443] headers_count=0
+[info] [h2] stream=21 CONNECT 3.213.232.221:443
+[info] [server] conn_id=1 CONNECT 3.213.232.221:443 (direct) stream=21
+[info] [upstream] stream=21 connecting to 3.213.232.221:443 use_socks5=no
+[info] [upstream] stream=21 socket=15 connected=no
+[info] [server] conn_id=1 stream=21 upstream sock=15 connected=no state=0
+[info] [server] conn_id=1 read 549 bytes from client, total=571
+[info] [upstream] stream=21 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=21 upstream connected
+[info] [server] conn_id=1 read 23 bytes from client, total=23
+[info] [h2] on_begin_headers stream=23 cat=0 flags=12 length=14
+[info] [h2] created StreamState for stream=23
+[info] [h2] on_header stream=23 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=23 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=23 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=23
+[info] [h2] stream=23 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=23 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=23
+[info] [upstream] stream=23 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=23 socket=16 connected=no
+[info] [server] conn_id=1 stream=23 upstream sock=16 connected=no state=0
+[info] [upstream] stream=23 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=23 upstream connected
+[info] [server] conn_id=1 read 546 bytes from client, total=546
+[info] [server] conn_id=1 read 17 bytes from client, total=17
+[info] [h2] on_begin_headers stream=25 cat=0 flags=12 length=8
+[info] [h2] created StreamState for stream=25
+[info] [h2] on_header stream=25 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=25 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=25 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=25
+[info] [h2] stream=25 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=25 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=25
+[info] [upstream] stream=25 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=25 socket=17 connected=no
+[info] [server] conn_id=1 stream=25 upstream sock=17 connected=no state=0
+[info] [server] conn_id=1 read 541 bytes from client, total=558
+[info] [upstream] stream=25 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=25 upstream connected
+[info] [server] conn_id=1 read 21 bytes from client, total=21
+[info] [h2] on_begin_headers stream=27 cat=0 flags=12 length=12
+[info] [h2] created StreamState for stream=27
+[info] [h2] on_header stream=27 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=27 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=27 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=27
+[info] [h2] stream=27 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=27 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=27
+[info] [upstream] stream=27 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=27 socket=18 connected=no
+[info] [server] conn_id=1 stream=27 upstream sock=18 connected=no state=0
+[info] [upstream] stream=27 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=27 upstream connected
+[info] [server] conn_id=1 read 550 bytes from client, total=550
+[info] [server] conn_id=1 read 28 bytes from client, total=28
+[info] [h2] on_begin_headers stream=29 cat=0 flags=12 length=19
+[info] [h2] created StreamState for stream=29
+[info] [h2] on_header stream=29 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=29 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=29 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=29
+[info] [h2] stream=29 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=29 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=29
+[info] [upstream] stream=29 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=29 socket=19 connected=no
+[info] [server] conn_id=1 stream=29 upstream sock=19 connected=no state=0
+[info] [upstream] stream=29 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=29 upstream connected
+[info] [server] conn_id=1 read 545 bytes from client, total=545
+[info] [server] conn_id=1 read 27 bytes from client, total=27
+[info] [h2] on_begin_headers stream=31 cat=0 flags=12 length=18
+[info] [h2] created StreamState for stream=31
+[info] [h2] on_header stream=31 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=31 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=31 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=31
+[info] [h2] stream=31 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=31 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=31
+[info] [upstream] stream=31 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=31 socket=20 connected=no
+[info] [server] conn_id=1 stream=31 upstream sock=20 connected=no state=0
+[info] [upstream] stream=31 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=31 upstream connected
+[info] [server] conn_id=1 read 618 bytes from client, total=618
+[info] [server] conn_id=1 read 19 bytes from client, total=19
+[info] [h2] on_begin_headers stream=33 cat=0 flags=12 length=10
+[info] [h2] created StreamState for stream=33
+[info] [h2] on_header stream=33 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=33 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=33 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=33
+[info] [h2] stream=33 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=33 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=33
+[info] [upstream] stream=33 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=33 socket=21 connected=no
+[info] [server] conn_id=1 stream=33 upstream sock=21 connected=no state=0
+[info] [server] conn_id=1 read 542 bytes from client, total=561
+[info] [upstream] stream=33 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=33 upstream connected
+[info] [server] conn_id=1 read 29 bytes from client, total=29
+[info] [h2] on_begin_headers stream=35 cat=0 flags=12 length=20
+[info] [h2] created StreamState for stream=35
+[info] [h2] on_header stream=35 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=35 name=[:authority] value=[3.213.232.221:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=35 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=3.213.232.221:443 headers_count=0
+[info] [h2] handle_connect stream=35
+[info] [h2] stream=35 method=[CONNECT] authority=[3.213.232.221:443] headers_count=0
+[info] [h2] stream=35 CONNECT 3.213.232.221:443
+[info] [server] conn_id=1 CONNECT 3.213.232.221:443 (direct) stream=35
+[info] [upstream] stream=35 connecting to 3.213.232.221:443 use_socks5=no
+[info] [upstream] stream=35 socket=22 connected=no
+[info] [server] conn_id=1 stream=35 upstream sock=22 connected=no state=0
+[info] [upstream] stream=35 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=35 upstream connected
+[info] [server] conn_id=1 read 146 bytes from client, total=146
+[info] [server] conn_id=1 read 541 bytes from client, total=687
+[info] [server] conn_id=1 read 38 bytes from client, total=38
+[info] [h2] on_begin_headers stream=37 cat=0 flags=12 length=29
+[info] [h2] created StreamState for stream=37
+[info] [h2] on_header stream=37 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=37 name=[:authority] value=[52.71.170.232:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=37 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.170.232:443 headers_count=0
+[info] [h2] handle_connect stream=37
+[info] [h2] stream=37 method=[CONNECT] authority=[52.71.170.232:443] headers_count=0
+[info] [h2] stream=37 CONNECT 52.71.170.232:443
+[info] [server] conn_id=1 CONNECT 52.71.170.232:443 (direct) stream=37
+[info] [upstream] stream=37 connecting to 52.71.170.232:443 use_socks5=no
+[info] [upstream] stream=37 socket=23 connected=no
+[info] [server] conn_id=1 stream=37 upstream sock=23 connected=no state=0
+[info] [upstream] stream=37 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=37 upstream connected
+[info] [server] conn_id=1 read 136 bytes from client, total=136
+[info] [server] conn_id=1 read 533 bytes from client, total=669
+[info] [server] conn_id=1 read 46 bytes from client, total=46
+[info] [h2] on_begin_headers stream=39 cat=0 flags=12 length=37
+[info] [h2] created StreamState for stream=39
+[info] [h2] on_header stream=39 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=39 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=39 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=39
+[info] [h2] stream=39 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=39 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=39
+[info] [upstream] stream=39 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=39 socket=24 connected=no
+[info] [server] conn_id=1 stream=39 upstream sock=24 connected=no state=0
+[info] [upstream] stream=39 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=39 upstream connected
+[info] [server] conn_id=1 read 539 bytes from client, total=539
+[info] [server] conn_id=1 read 29 bytes from client, total=29
+[info] [h2] on_begin_headers stream=41 cat=0 flags=12 length=20
+[info] [h2] created StreamState for stream=41
+[info] [h2] on_header stream=41 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=41 name=[:authority] value=[52.71.170.232:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=41 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.170.232:443 headers_count=0
+[info] [h2] handle_connect stream=41
+[info] [h2] stream=41 method=[CONNECT] authority=[52.71.170.232:443] headers_count=0
+[info] [h2] stream=41 CONNECT 52.71.170.232:443
+[info] [server] conn_id=1 CONNECT 52.71.170.232:443 (direct) stream=41
+[info] [upstream] stream=41 connecting to 52.71.170.232:443 use_socks5=no
+[info] [upstream] stream=41 socket=25 connected=no
+[info] [server] conn_id=1 stream=41 upstream sock=25 connected=no state=0
+[info] [upstream] stream=41 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=41 upstream connected
+[info] [server] conn_id=1 read 223 bytes from client, total=223
+[info] [server] conn_id=1 read 541 bytes from client, total=764
+[info] [server] conn_id=1 read 19 bytes from client, total=19
+[info] [h2] on_begin_headers stream=43 cat=0 flags=12 length=10
+[info] [h2] created StreamState for stream=43
+[info] [h2] on_header stream=43 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=43 name=[:authority] value=[52.71.170.232:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=43 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.170.232:443 headers_count=0
+[info] [h2] handle_connect stream=43
+[info] [h2] stream=43 method=[CONNECT] authority=[52.71.170.232:443] headers_count=0
+[info] [h2] stream=43 CONNECT 52.71.170.232:443
+[info] [server] conn_id=1 CONNECT 52.71.170.232:443 (direct) stream=43
+[info] [upstream] stream=43 connecting to 52.71.170.232:443 use_socks5=no
+[info] [upstream] stream=43 socket=26 connected=no
+[info] [server] conn_id=1 stream=43 upstream sock=26 connected=no state=0
+[info] [upstream] stream=43 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=43 upstream connected
+[info] [server] conn_id=1 read 163 bytes from client, total=163
+[info] [server] conn_id=1 read 536 bytes from client, total=699
+[info] [server] conn_id=1 read 97 bytes from client, total=97
+[info] [h2] on_begin_headers stream=45 cat=0 flags=12 length=88
+[info] [h2] created StreamState for stream=45
+[info] [h2] on_header stream=45 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=45 name=[:authority] value=[3.213.232.221:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=45 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=3.213.232.221:443 headers_count=0
+[info] [h2] handle_connect stream=45
+[info] [h2] stream=45 method=[CONNECT] authority=[3.213.232.221:443] headers_count=0
+[info] [h2] stream=45 CONNECT 3.213.232.221:443
+[info] [server] conn_id=1 CONNECT 3.213.232.221:443 (direct) stream=45
+[info] [upstream] stream=45 connecting to 3.213.232.221:443 use_socks5=no
+[info] [upstream] stream=45 socket=27 connected=no
+[info] [server] conn_id=1 stream=45 upstream sock=27 connected=no state=0
+[info] [upstream] stream=45 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=45 upstream connected
+[info] [server] conn_id=1 read 145 bytes from client, total=145
+[info] [server] conn_id=1 read 539 bytes from client, total=684
+[info] [server] conn_id=1 read 14 bytes from client, total=14
+[info] [h2] on_begin_headers stream=47 cat=0 flags=12 length=5
+[info] [h2] created StreamState for stream=47
+[info] [h2] on_header stream=47 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=47 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=47 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=47
+[info] [h2] stream=47 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=47 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=47
+[info] [upstream] stream=47 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=47 socket=28 connected=no
+[info] [server] conn_id=1 stream=47 upstream sock=28 connected=no state=0
+[info] [upstream] stream=47 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=47 upstream connected
+[info] [server] conn_id=1 read 137 bytes from client, total=137
+[info] [server] conn_id=1 read 537 bytes from client, total=674
+[info] [server] conn_id=1 read 14 bytes from client, total=14
+[info] [h2] on_begin_headers stream=49 cat=0 flags=12 length=5
+[info] [h2] created StreamState for stream=49
+[info] [h2] on_header stream=49 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=49 name=[:authority] value=[44.218.58.97:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=49 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=44.218.58.97:443 headers_count=0
+[info] [h2] handle_connect stream=49
+[info] [h2] stream=49 method=[CONNECT] authority=[44.218.58.97:443] headers_count=0
+[info] [h2] stream=49 CONNECT 44.218.58.97:443
+[info] [server] conn_id=1 CONNECT 44.218.58.97:443 (direct) stream=49
+[info] [upstream] stream=49 connecting to 44.218.58.97:443 use_socks5=no
+[info] [upstream] stream=49 socket=29 connected=no
+[info] [server] conn_id=1 stream=49 upstream sock=29 connected=no state=0
+[info] [upstream] stream=49 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=49 upstream connected
+[info] [server] conn_id=1 read 136 bytes from client, total=136
+[info] [server] conn_id=1 read 570 bytes from client, total=706
+[info] [server] conn_id=1 read 23 bytes from client, total=23
+[info] [h2] on_begin_headers stream=51 cat=0 flags=12 length=14
+[info] [h2] created StreamState for stream=51
+[info] [h2] on_header stream=51 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=51 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=51 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=51
+[info] [h2] stream=51 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=51 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=51
+[info] [upstream] stream=51 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=51 socket=30 connected=no
+[info] [server] conn_id=1 stream=51 upstream sock=30 connected=no state=0
+[info] [server] conn_id=1 read 137 bytes from client, total=160
+[info] [server] conn_id=1 read 581 bytes from client, total=741
+[info] [upstream] stream=51 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=51 upstream connected
+[info] [server] conn_id=1 read 71 bytes from client, total=71
+[info] [h2] on_begin_headers stream=53 cat=0 flags=12 length=62
+[info] [h2] created StreamState for stream=53
+[info] [h2] on_header stream=53 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=53 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=53 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=53
+[info] [h2] stream=53 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=53 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=53
+[info] [upstream] stream=53 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=53 socket=31 connected=no
+[info] [server] conn_id=1 stream=53 upstream sock=31 connected=no state=0
+[info] [upstream] stream=53 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=53 upstream connected
+[info] [server] conn_id=1 read 191 bytes from client, total=191
+[info] [server] conn_id=1 read 161 bytes from client, total=352
+[info] [server] conn_id=1 read 136 bytes from client, total=488
+[info] [server] conn_id=1 read 535 bytes from client, total=1023
+[info] [server] conn_id=1 read 21 bytes from client, total=21
+[info] [h2] on_begin_headers stream=55 cat=0 flags=12 length=12
+[info] [h2] created StreamState for stream=55
+[info] [h2] on_header stream=55 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=55 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=55 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=55
+[info] [h2] stream=55 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=55 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=55
+[info] [upstream] stream=55 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=55 socket=32 connected=no
+[info] [server] conn_id=1 stream=55 upstream sock=32 connected=no state=0
+[info] [upstream] stream=55 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=55 upstream connected
+[info] [server] conn_id=1 read 201 bytes from client, total=201
+[info] [server] conn_id=1 read 177 bytes from client, total=378
+[info] [server] conn_id=1 read 539 bytes from client, total=917
+[info] [server] conn_id=1 read 22 bytes from client, total=22
+[info] [h2] on_begin_headers stream=57 cat=0 flags=12 length=13
+[info] [h2] created StreamState for stream=57
+[info] [h2] on_header stream=57 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=57 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=57 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=57
+[info] [h2] stream=57 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=57 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=57
+[info] [upstream] stream=57 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=57 socket=33 connected=no
+[info] [server] conn_id=1 stream=57 upstream sock=33 connected=no state=0
+[info] [upstream] stream=57 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=57 upstream connected
+[info] [server] conn_id=1 read 530 bytes from client, total=530
+[info] [server] conn_id=1 read 14 bytes from client, total=14
+[info] [h2] on_begin_headers stream=59 cat=0 flags=12 length=5
+[info] [h2] created StreamState for stream=59
+[info] [h2] on_header stream=59 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=59 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=59 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=59
+[info] [h2] stream=59 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=59 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=59
+[info] [upstream] stream=59 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=59 socket=34 connected=no
+[info] [server] conn_id=1 stream=59 upstream sock=34 connected=no state=0
+[info] [upstream] stream=59 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=59 upstream connected
+[info] [server] conn_id=1 read 215 bytes from client, total=215
+[info] [server] conn_id=1 read 217 bytes from client, total=432
+[info] [server] conn_id=1 read 536 bytes from client, total=968
+[info] [server] conn_id=1 read 50 bytes from client, total=50
+[info] [h2] on_begin_headers stream=61 cat=0 flags=12 length=41
+[info] [h2] created StreamState for stream=61
+[info] [h2] on_header stream=61 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=61 name=[:authority] value=[52.71.170.232:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=61 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.170.232:443 headers_count=0
+[info] [h2] handle_connect stream=61
+[info] [h2] stream=61 method=[CONNECT] authority=[52.71.170.232:443] headers_count=0
+[info] [h2] stream=61 CONNECT 52.71.170.232:443
+[info] [server] conn_id=1 CONNECT 52.71.170.232:443 (direct) stream=61
+[info] [upstream] stream=61 connecting to 52.71.170.232:443 use_socks5=no
+[info] [upstream] stream=61 socket=35 connected=no
+[info] [server] conn_id=1 stream=61 upstream sock=35 connected=no state=0
+[info] [upstream] stream=61 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=61 upstream connected
+[info] [server] conn_id=1 read 150 bytes from client, total=150
+[info] [server] conn_id=1 read 136 bytes from client, total=286
+[info] [server] conn_id=1 read 539 bytes from client, total=825
+[info] [server] conn_id=1 read 11 bytes from client, total=11
+[info] [h2] on_begin_headers stream=63 cat=0 flags=4 length=2
+[info] [h2] created StreamState for stream=63
+[info] [h2] on_header stream=63 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=63 name=[:authority] value=[52.71.170.232:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=63 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.170.232:443 headers_count=0
+[info] [h2] handle_connect stream=63
+[info] [h2] stream=63 method=[CONNECT] authority=[52.71.170.232:443] headers_count=0
+[info] [h2] stream=63 CONNECT 52.71.170.232:443
+[info] [server] conn_id=1 CONNECT 52.71.170.232:443 (direct) stream=63
+[info] [upstream] stream=63 connecting to 52.71.170.232:443 use_socks5=no
+[info] [upstream] stream=63 socket=36 connected=no
+[info] [server] conn_id=1 stream=63 upstream sock=36 connected=no state=0
+[info] [upstream] stream=63 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=63 upstream connected
+[info] [server] conn_id=1 read 190 bytes from client, total=190
+[info] [server] conn_id=1 read 138 bytes from client, total=328
+[info] [server] conn_id=1 read 536 bytes from client, total=864
+[info] [server] conn_id=1 read 17 bytes from client, total=17
+[info] [h2] on_begin_headers stream=65 cat=0 flags=12 length=8
+[info] [h2] created StreamState for stream=65
+[info] [h2] on_header stream=65 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=65 name=[:authority] value=[44.218.58.97:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=65 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=44.218.58.97:443 headers_count=0
+[info] [h2] handle_connect stream=65
+[info] [h2] stream=65 method=[CONNECT] authority=[44.218.58.97:443] headers_count=0
+[info] [h2] stream=65 CONNECT 44.218.58.97:443
+[info] [server] conn_id=1 CONNECT 44.218.58.97:443 (direct) stream=65
+[info] [upstream] stream=65 connecting to 44.218.58.97:443 use_socks5=no
+[info] [upstream] stream=65 socket=37 connected=no
+[info] [server] conn_id=1 stream=65 upstream sock=37 connected=no state=0
+[info] [upstream] stream=65 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=65 upstream connected
+[info] [server] conn_id=1 read 218 bytes from client, total=218
+[info] [server] conn_id=1 read 531 bytes from client, total=749
+[info] [server] conn_id=1 read 107 bytes from client, total=107
+[info] [h2] on_begin_headers stream=67 cat=0 flags=12 length=98
+[info] [h2] created StreamState for stream=67
+[info] [h2] on_header stream=67 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=67 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=67 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=67
+[info] [h2] stream=67 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=67 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=67
+[info] [upstream] stream=67 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=67 socket=38 connected=no
+[info] [server] conn_id=1 stream=67 upstream sock=38 connected=no state=0
+[info] [upstream] stream=67 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=67 upstream connected
+[info] [server] conn_id=1 read 221 bytes from client, total=221
+[info] [server] conn_id=1 read 565 bytes from client, total=786
+[info] [server] conn_id=1 read 69 bytes from client, total=69
+[info] [h2] on_begin_headers stream=69 cat=0 flags=12 length=60
+[info] [h2] created StreamState for stream=69
+[info] [h2] on_header stream=69 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=69 name=[:authority] value=[3.213.232.221:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=69 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=3.213.232.221:443 headers_count=0
+[info] [h2] handle_connect stream=69
+[info] [h2] stream=69 method=[CONNECT] authority=[3.213.232.221:443] headers_count=0
+[info] [h2] stream=69 CONNECT 3.213.232.221:443
+[info] [server] conn_id=1 CONNECT 3.213.232.221:443 (direct) stream=69
+[info] [upstream] stream=69 connecting to 3.213.232.221:443 use_socks5=no
+[info] [upstream] stream=69 socket=39 connected=no
+[info] [server] conn_id=1 stream=69 upstream sock=39 connected=no state=0
+[info] [upstream] stream=69 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=69 upstream connected
+[info] [server] conn_id=1 read 195 bytes from client, total=195
+[info] [server] conn_id=1 read 194 bytes from client, total=389
+[info] [server] conn_id=1 read 137 bytes from client, total=526
+[info] [server] conn_id=1 read 144 bytes from client, total=670
+[info] [server] conn_id=1 read 564 bytes from client, total=1234
+[info] [server] conn_id=1 read 29 bytes from client, total=29
+[info] [h2] on_begin_headers stream=71 cat=0 flags=12 length=20
+[info] [h2] created StreamState for stream=71
+[info] [h2] on_header stream=71 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=71 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=71 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=71
+[info] [h2] stream=71 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=71 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=71
+[info] [upstream] stream=71 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=71 socket=40 connected=no
+[info] [server] conn_id=1 stream=71 upstream sock=40 connected=no state=0
+[info] [server] conn_id=1 read 200 bytes from client, total=200
+[info] [server] conn_id=1 read 201 bytes from client, total=401
+[info] [server] conn_id=1 read 537 bytes from client, total=938
+[info] [upstream] stream=71 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=71 upstream connected
+[info] [server] conn_id=1 read 24 bytes from client, total=24
+[info] [h2] on_begin_headers stream=73 cat=0 flags=12 length=15
+[info] [h2] created StreamState for stream=73
+[info] [h2] on_header stream=73 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=73 name=[:authority] value=[3.213.232.221:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=73 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=3.213.232.221:443 headers_count=0
+[info] [h2] handle_connect stream=73
+[info] [h2] stream=73 method=[CONNECT] authority=[3.213.232.221:443] headers_count=0
+[info] [h2] stream=73 CONNECT 3.213.232.221:443
+[info] [server] conn_id=1 CONNECT 3.213.232.221:443 (direct) stream=73
+[info] [upstream] stream=73 connecting to 3.213.232.221:443 use_socks5=no
+[info] [upstream] stream=73 socket=41 connected=no
+[info] [server] conn_id=1 stream=73 upstream sock=41 connected=no state=0
+[info] [upstream] stream=73 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=73 upstream connected
+[info] [server] conn_id=1 read 23 bytes from client, total=23
+[info] [server] conn_id=1 read 226 bytes from client, total=249
+[info] [server] conn_id=1 read 142 bytes from client, total=391
+[info] [server] conn_id=1 read 540 bytes from client, total=931
+[info] [server] conn_id=1 read 19 bytes from client, total=19
+[info] [h2] on_begin_headers stream=75 cat=0 flags=12 length=10
+[info] [h2] created StreamState for stream=75
+[info] [h2] on_header stream=75 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=75 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=75 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=75
+[info] [h2] stream=75 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=75 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=75
+[info] [upstream] stream=75 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=75 socket=42 connected=no
+[info] [server] conn_id=1 stream=75 upstream sock=42 connected=no state=0
+[info] [upstream] stream=75 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=75 upstream connected
+[info] [server] conn_id=1 read 138 bytes from client, total=138
+[info] [server] conn_id=1 read 539 bytes from client, total=677
+[info] [server] conn_id=1 read 25 bytes from client, total=25
+[info] [h2] on_begin_headers stream=77 cat=0 flags=12 length=16
+[info] [h2] created StreamState for stream=77
+[info] [h2] on_header stream=77 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=77 name=[:authority] value=[52.71.170.232:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=77 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.170.232:443 headers_count=0
+[info] [h2] handle_connect stream=77
+[info] [h2] stream=77 method=[CONNECT] authority=[52.71.170.232:443] headers_count=0
+[info] [h2] stream=77 CONNECT 52.71.170.232:443
+[info] [server] conn_id=1 CONNECT 52.71.170.232:443 (direct) stream=77
+[info] [upstream] stream=77 connecting to 52.71.170.232:443 use_socks5=no
+[info] [upstream] stream=77 socket=43 connected=no
+[info] [server] conn_id=1 stream=77 upstream sock=43 connected=no state=0
+[info] [server] conn_id=1 read 19 bytes from client, total=44
+[info] [server] conn_id=1 read 276 bytes from client, total=276
+[info] [server] conn_id=1 read 138 bytes from client, total=414
+[info] [server] conn_id=1 read 561 bytes from client, total=975
+[info] [upstream] stream=77 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=77 upstream connected
+[info] [server] conn_id=1 read 21 bytes from client, total=21
+[info] [h2] on_begin_headers stream=79 cat=0 flags=12 length=12
+[info] [h2] created StreamState for stream=79
+[info] [h2] on_header stream=79 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=79 name=[:authority] value=[44.218.58.97:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=79 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=44.218.58.97:443 headers_count=0
+[info] [h2] handle_connect stream=79
+[info] [h2] stream=79 method=[CONNECT] authority=[44.218.58.97:443] headers_count=0
+[info] [h2] stream=79 CONNECT 44.218.58.97:443
+[info] [server] conn_id=1 CONNECT 44.218.58.97:443 (direct) stream=79
+[info] [upstream] stream=79 connecting to 44.218.58.97:443 use_socks5=no
+[info] [upstream] stream=79 socket=44 connected=no
+[info] [server] conn_id=1 stream=79 upstream sock=44 connected=no state=0
+[info] [upstream] stream=79 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=79 upstream connected
+[info] [server] conn_id=1 read 24 bytes from client, total=24
+[info] [server] conn_id=1 read 201 bytes from client, total=225
+[info] [server] conn_id=1 read 536 bytes from client, total=761
+[info] [server] conn_id=1 read 34 bytes from client, total=34
+[info] [h2] on_begin_headers stream=81 cat=0 flags=12 length=25
+[info] [h2] created StreamState for stream=81
+[info] [h2] on_header stream=81 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=81 name=[:authority] value=[44.218.58.97:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=81 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=44.218.58.97:443 headers_count=0
+[info] [h2] handle_connect stream=81
+[info] [h2] stream=81 method=[CONNECT] authority=[44.218.58.97:443] headers_count=0
+[info] [h2] stream=81 CONNECT 44.218.58.97:443
+[info] [server] conn_id=1 CONNECT 44.218.58.97:443 (direct) stream=81
+[info] [upstream] stream=81 connecting to 44.218.58.97:443 use_socks5=no
+[info] [upstream] stream=81 socket=45 connected=no
+[info] [server] conn_id=1 stream=81 upstream sock=45 connected=no state=0
+[info] [upstream] stream=81 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=81 upstream connected
+[info] [server] conn_id=1 read 31 bytes from client, total=31
+[info] [server] conn_id=1 read 216 bytes from client, total=247
+[info] [server] conn_id=1 read 151 bytes from client, total=398
+[info] [server] conn_id=1 read 556 bytes from client, total=954
+[info] [server] conn_id=1 read 106 bytes from client, total=106
+[info] [h2] on_begin_headers stream=83 cat=0 flags=12 length=97
+[info] [h2] created StreamState for stream=83
+[info] [h2] on_header stream=83 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=83 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=83 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=83
+[info] [h2] stream=83 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=83 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=83
+[info] [upstream] stream=83 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=83 socket=46 connected=no
+[info] [server] conn_id=1 stream=83 upstream sock=46 connected=no state=0
+[info] [server] conn_id=1 read 533 bytes from client, total=533
+[info] [upstream] stream=83 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=83 upstream connected
+[info] [server] conn_id=1 read 20 bytes from client, total=20
+[info] [h2] on_begin_headers stream=85 cat=0 flags=12 length=11
+[info] [h2] created StreamState for stream=85
+[info] [h2] on_header stream=85 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=85 name=[:authority] value=[44.218.58.97:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=85 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=44.218.58.97:443 headers_count=0
+[info] [h2] handle_connect stream=85
+[info] [h2] stream=85 method=[CONNECT] authority=[44.218.58.97:443] headers_count=0
+[info] [h2] stream=85 CONNECT 44.218.58.97:443
+[info] [server] conn_id=1 CONNECT 44.218.58.97:443 (direct) stream=85
+[info] [upstream] stream=85 connecting to 44.218.58.97:443 use_socks5=no
+[info] [upstream] stream=85 socket=47 connected=no
+[info] [server] conn_id=1 stream=85 upstream sock=47 connected=no state=0
+[info] [upstream] stream=85 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=85 upstream connected
+[info] [server] conn_id=1 read 18 bytes from client, total=18
+[info] [server] conn_id=1 read 150 bytes from client, total=168
+[info] [server] conn_id=1 read 541 bytes from client, total=709
+[info] [server] conn_id=1 read 29 bytes from client, total=29
+[info] [h2] on_begin_headers stream=87 cat=0 flags=12 length=20
+[info] [h2] created StreamState for stream=87
+[info] [h2] on_header stream=87 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=87 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=87 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=87
+[info] [h2] stream=87 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=87 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=87
+[info] [upstream] stream=87 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=87 socket=48 connected=no
+[info] [server] conn_id=1 stream=87 upstream sock=48 connected=no state=0
+[info] [upstream] stream=87 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=87 upstream connected
+[info] [server] conn_id=1 read 14 bytes from client, total=14
+[info] [server] conn_id=1 read 19 bytes from client, total=33
+[info] [server] conn_id=1 read 201 bytes from client, total=234
+[info] [server] conn_id=1 read 251 bytes from client, total=485
+[info] [server] conn_id=1 read 170 bytes from client, total=655
+[info] [server] conn_id=1 read 147 bytes from client, total=802
+[info] [server] conn_id=1 read 211 bytes from client, total=1013
+[info] [server] conn_id=1 read 150 bytes from client, total=1163
+[info] [server] conn_id=1 read 529 bytes from client, total=1692
+[info] [server] conn_id=1 read 17 bytes from client, total=17
+[info] [h2] on_begin_headers stream=89 cat=0 flags=12 length=8
+[info] [h2] created StreamState for stream=89
+[info] [h2] on_header stream=89 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=89 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=89 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=89
+[info] [h2] stream=89 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=89 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=89
+[info] [upstream] stream=89 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=89 socket=49 connected=no
+[info] [server] conn_id=1 stream=89 upstream sock=49 connected=no state=0
+[info] [server] conn_id=1 read 23 bytes from client, total=40
+[info] [upstream] stream=89 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=89 upstream connected
+[info] [server] conn_id=1 read 142 bytes from client, total=142
+[info] [server] conn_id=1 read 143 bytes from client, total=285
+[info] [server] conn_id=1 read 527 bytes from client, total=812
+[info] [server] conn_id=1 read 20 bytes from client, total=20
+[info] [h2] on_begin_headers stream=91 cat=0 flags=12 length=11
+[info] [h2] created StreamState for stream=91
+[info] [h2] on_header stream=91 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=91 name=[:authority] value=[52.71.170.232:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=91 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.170.232:443 headers_count=0
+[info] [h2] handle_connect stream=91
+[info] [h2] stream=91 method=[CONNECT] authority=[52.71.170.232:443] headers_count=0
+[info] [h2] stream=91 CONNECT 52.71.170.232:443
+[info] [server] conn_id=1 CONNECT 52.71.170.232:443 (direct) stream=91
+[info] [upstream] stream=91 connecting to 52.71.170.232:443 use_socks5=no
+[info] [upstream] stream=91 socket=50 connected=no
+[info] [server] conn_id=1 stream=91 upstream sock=50 connected=no state=0
+[info] [server] conn_id=1 read 11 bytes from client, total=31
+[info] [upstream] stream=91 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=91 upstream connected
+[info] [server] conn_id=1 read 192 bytes from client, total=192
+[info] [server] conn_id=1 read 147 bytes from client, total=339
+[info] [server] conn_id=1 read 139 bytes from client, total=478
+[info] [server] conn_id=1 read 542 bytes from client, total=1020
+[info] [server] conn_id=1 read 72 bytes from client, total=72
+[info] [h2] on_begin_headers stream=93 cat=0 flags=12 length=63
+[info] [h2] created StreamState for stream=93
+[info] [h2] on_header stream=93 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=93 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=93 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=93
+[info] [h2] stream=93 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=93 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=93
+[info] [upstream] stream=93 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=93 socket=51 connected=no
+[info] [server] conn_id=1 stream=93 upstream sock=51 connected=no state=0
+[info] [upstream] stream=93 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=93 upstream connected
+[info] [server] conn_id=1 read 23 bytes from client, total=23
+[info] [server] conn_id=1 read 215 bytes from client, total=238
+[info] [server] conn_id=1 read 207 bytes from client, total=445
+[info] [server] conn_id=1 read 534 bytes from client, total=979
+[info] [server] conn_id=1 read 20 bytes from client, total=20
+[info] [h2] on_begin_headers stream=95 cat=0 flags=12 length=11
+[info] [h2] created StreamState for stream=95
+[info] [h2] on_header stream=95 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=95 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=95 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=95
+[info] [h2] stream=95 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=95 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=95
+[info] [upstream] stream=95 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=95 socket=52 connected=no
+[info] [server] conn_id=1 stream=95 upstream sock=52 connected=no state=0
+[info] [server] conn_id=1 read 18 bytes from client, total=38
+[info] [upstream] stream=95 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=95 upstream connected
+[info] [server] conn_id=1 read 9 bytes from client, total=9
+[info] [server] conn_id=1 read 157 bytes from client, total=166
+[info] [server] conn_id=1 read 193 bytes from client, total=359
+[info] [server] conn_id=1 read 619 bytes from client, total=978
+[info] [server] conn_id=1 read 19 bytes from client, total=19
+[info] [h2] on_begin_headers stream=97 cat=0 flags=12 length=10
+[info] [h2] created StreamState for stream=97
+[info] [h2] on_header stream=97 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=97 name=[:authority] value=[54.172.102.128:443] namelen=10 valuelen=18
+[info] [h2] HEADERS frame complete stream=97 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=54.172.102.128:443 headers_count=0
+[info] [h2] handle_connect stream=97
+[info] [h2] stream=97 method=[CONNECT] authority=[54.172.102.128:443] headers_count=0
+[info] [h2] stream=97 CONNECT 54.172.102.128:443
+[info] [server] conn_id=1 CONNECT 54.172.102.128:443 (direct) stream=97
+[info] [upstream] stream=97 connecting to 54.172.102.128:443 use_socks5=no
+[info] [upstream] stream=97 socket=53 connected=no
+[info] [server] conn_id=1 stream=97 upstream sock=53 connected=no state=0
+[info] [upstream] stream=97 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=97 upstream connected
+[info] [server] conn_id=1 read 136 bytes from client, total=136
+[info] [server] conn_id=1 read 536 bytes from client, total=672
+[info] [server] conn_id=1 read 21 bytes from client, total=21
+[info] [h2] on_begin_headers stream=99 cat=0 flags=12 length=12
+[info] [h2] created StreamState for stream=99
+[info] [h2] on_header stream=99 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=99 name=[:authority] value=[52.71.108.149:443] namelen=10 valuelen=17
+[info] [h2] HEADERS frame complete stream=99 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.71.108.149:443 headers_count=0
+[info] [h2] handle_connect stream=99
+[info] [h2] stream=99 method=[CONNECT] authority=[52.71.108.149:443] headers_count=0
+[info] [h2] stream=99 CONNECT 52.71.108.149:443
+[info] [server] conn_id=1 CONNECT 52.71.108.149:443 (direct) stream=99
+[info] [upstream] stream=99 connecting to 52.71.108.149:443 use_socks5=no
+[info] [upstream] stream=99 socket=54 connected=no
+[info] [server] conn_id=1 stream=99 upstream sock=54 connected=no state=0
+[info] [upstream] stream=99 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=99 upstream connected
+[info] [server] conn_id=1 read 19 bytes from client, total=19
+[info] [server] conn_id=1 read 234 bytes from client, total=253
+[info] [server] conn_id=1 read 141 bytes from client, total=394
+[info] [server] conn_id=1 read 542 bytes from client, total=936
+[info] [server] conn_id=1 read 25 bytes from client, total=25
+[info] [h2] on_begin_headers stream=101 cat=0 flags=12 length=16
+[info] [h2] created StreamState for stream=101
+[info] [h2] on_header stream=101 name=[:method] value=[CONNECT] namelen=7 valuelen=7
+[info] [h2] on_header stream=101 name=[:authority] value=[52.6.211.202:443] namelen=10 valuelen=16
+[info] [h2] HEADERS frame complete stream=101 cat=0
+[info] [h2] HEADERS complete: method=CONNECT authority=52.6.211.202:443 headers_count=0
+[info] [h2] handle_connect stream=101
+[info] [h2] stream=101 method=[CONNECT] authority=[52.6.211.202:443] headers_count=0
+[info] [h2] stream=101 CONNECT 52.6.211.202:443
+[info] [server] conn_id=1 CONNECT 52.6.211.202:443 (direct) stream=101
+[info] [upstream] stream=101 connecting to 52.6.211.202:443 use_socks5=no
+[info] [upstream] stream=101 socket=55 connected=no
+[info] [server] conn_id=1 stream=101 upstream sock=55 connected=no state=0
+[info] [server] conn_id=1 read 144 bytes from client, total=169
+[info] [upstream] stream=101 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=101 upstream connected
+[info] [server] conn_id=1 read 147 bytes from client, total=147
+[info] [server] conn_id=1 read 535 bytes from client, total=682
+[info] [server] conn_id=1 read 235 bytes from client, total=917
+[info] [server] conn_id=1 read 538 bytes from client, total=1455
+[info] [server] conn_id=1 read 204 bytes from client, total=204
+[info] [server] conn_id=1 read 19 bytes from client, total=223
+[info] [server] conn_id=1 read 38 bytes from client, total=261
+[info] [server] conn_id=1 read 22 bytes from client, total=283
+[info] [server] conn_id=1 read 203 bytes from client, total=486
+[info] [server] conn_id=1 read 198 bytes from client, total=684
+[info] [server] conn_id=1 read 199 bytes from client, total=883
+[info] [server] conn_id=1 read 164 bytes from client, total=1047
+[info] [server] conn_id=1 read 49 bytes from client, total=1096
+[info] [server] conn_id=1 read 193 bytes from client, total=1289
+[info] [server] conn_id=1 read 201 bytes from client, total=1490
+[info] [server] conn_id=1 read 193 bytes from client, total=1683
+[info] [server] conn_id=1 read 40 bytes from client, total=1723
+[info] [server] conn_id=1 read 152 bytes from client, total=1875
+[info] [server] conn_id=1 read 145 bytes from client, total=2020
+[info] [server] conn_id=1 read 551 bytes from client, total=2571
+[info] [server] conn_id=1 read 45 bytes from client, total=45
+[info] [server] conn_id=1 read 125 bytes from client, total=125
+[info] [server] conn_id=1 read 16 bytes from client, total=141
+[info] [server] conn_id=1 read 16 bytes from client, total=157
+[info] [server] conn_id=1 read 143 bytes from client, total=300
+[info] [server] conn_id=1 read 138 bytes from client, total=138
+[info] [server] conn_id=1 read 105 bytes from client, total=105
+[info] [server] conn_id=1 read 122 bytes from client, total=227
+[info] [server] conn_id=1 read 47 bytes from client, total=47
+[info] [server] conn_id=1 read 113 bytes from client, total=113
+[info] [server] conn_id=1 read 94 bytes from client, total=94
+[info] [server] conn_id=1 read 60 bytes from client, total=154
+[info] [server] conn_id=1 read 113 bytes from client, total=113
+[info] [server] conn_id=1 read 176 bytes from client, total=176
+[info] [server] conn_id=1 read 140 bytes from client, total=140
+[info] [server] conn_id=1 read 123 bytes from client, total=123
+[info] [server] conn_id=1 read 142 bytes from client, total=265
+[info] [server] conn_id=1 read 159 bytes from client, total=159
+[info] [server] conn_id=1 read 123 bytes from client, total=123
+[info] [server] conn_id=1 read 126 bytes from client, total=249
+[info] [server] conn_id=1 read 60 bytes from client, total=60
+[info] [server] conn_id=1 read 163 bytes from client, total=163
+[info] [server] conn_id=1 read 95 bytes from client, total=95
+[info] [server] conn_id=1 stream=43 upstream EOF
+[info] [server] conn_id=1 read 43 bytes from client, total=43
+[info] [server] conn_id=1 read 17 bytes from client, total=17
+[info] [server] conn_id=1 read 199 bytes from client, total=199
+[info] [server] conn_id=1 read 113 bytes from client, total=113
+[info] [server] conn_id=1 read 123 bytes from client, total=123
+[info] [server] conn_id=1 read 102 bytes from client, total=225
+[info] [server] conn_id=1 read 50 bytes from client, total=50
+[info] [server] conn_id=1 read 144 bytes from client, total=194
+[info] [server] conn_id=1 read 119 bytes from client, total=313
+[info] [server] conn_id=1 read 40 bytes from client, total=40
+[info] [server] conn_id=1 read 94 bytes from client, total=94
+[info] [server] conn_id=1 stream=41 upstream EOF
+[info] [server] conn_id=1 read 49 bytes from client, total=49
+[info] [server] conn_id=1 read 36 bytes from client, total=85
+[info] [server] conn_id=1 read 53 bytes from client, total=138
+[info] [server] conn_id=1 read 110 bytes from client, total=248
+[info] [server] conn_id=1 read 14 bytes from client, total=14
+[info] [server] conn_id=1 read 40 bytes from client, total=54
+[info] [server] conn_id=1 stream=47 upstream EOF
+[info] [server] conn_id=1 read 194 bytes from client, total=194
+[info] [server] conn_id=1 read 48 bytes from client, total=48
+[info] [server] conn_id=1 read 184 bytes from client, total=184
+[info] [server] conn_id=1 read 104 bytes from client, total=288
+[info] [server] conn_id=1 read 22 bytes from client, total=310
+[info] [server] conn_id=1 read 65 bytes from client, total=65
+[info] [server] conn_id=1 read 17 bytes from client, total=17
+[info] [server] conn_id=1 read 142 bytes from client, total=142
+[info] [server] conn_id=1 read 145 bytes from client, total=287
+[info] [server] conn_id=1 read 49 bytes from client, total=49
+[info] [server] conn_id=1 read 91 bytes from client, total=91
+[info] [server] conn_id=1 read 51 bytes from client, total=51
+[info] [server] conn_id=1 read 25 bytes from client, total=76
+[info] [server] conn_id=1 read 51 bytes from client, total=51
+[info] [server] conn_id=1 read 24 bytes from client, total=75
+[info] [server] conn_id=1 read 43 bytes from client, total=43
+[info] [server] conn_id=1 read 15 bytes from client, total=58
+[info] [server] conn_id=1 read 194 bytes from client, total=194
+[info] [server] conn_id=1 read 207 bytes from client, total=207
+[info] [server] conn_id=1 read 147 bytes from client, total=354
+[info] [server] conn_id=1 read 151 bytes from client, total=505
+[info] [server] conn_id=1 stream=49 upstream EOF
+[info] [server] conn_id=1 stream=55 upstream EOF
+[info] [server] conn_id=1 stream=57 upstream EOF
+[info] [server] conn_id=1 read 40 bytes from client, total=40
+[info] [server] conn_id=1 read 57 bytes from client, total=57
+[info] [server] conn_id=1 read 30 bytes from client, total=30
+[info] [server] conn_id=1 read 17 bytes from client, total=47
+[info] [server] conn_id=1 stream=25 upstream EOF
+[info] [server] conn_id=1 read 130 bytes from client, total=130
+[info] [server] conn_id=1 read 54 bytes from client, total=54
+[info] [server] conn_id=1 stream=45 upstream EOF
+[info] [server] conn_id=1 read 13 bytes from client, total=13
+[info] [server] conn_id=1 read 173 bytes from client, total=186
+[info] [server] conn_id=1 read 30 bytes from client, total=216
+[info] [server] conn_id=1 read 47 bytes from client, total=47
+[info] [server] conn_id=1 read 17 bytes from client, total=17
+[info] [server] conn_id=1 stream=63 upstream EOF
+[info] [server] conn_id=1 stream=37 upstream EOF
+[info] [server] conn_id=1 stream=65 upstream EOF
+[info] [server] conn_id=1 read 88 bytes from client, total=88
+[info] [server] conn_id=1 read 200 bytes from client, total=200
+[info] [server] conn_id=1 read 201 bytes from client, total=401
+[info] [server] conn_id=1 read 18 bytes from client, total=419
+[info] [server] conn_id=1 read 43 bytes from client, total=43
+[info] [server] conn_id=1 read 15 bytes from client, total=58
+[info] [server] conn_id=1 stream=67 upstream EOF
+[info] [server] conn_id=1 read 140 bytes from client, total=140
+[info] [server] conn_id=1 stream=61 upstream EOF
+[info] [server] conn_id=1 stream=53 upstream EOF
+[info] [server] conn_id=1 read 47 bytes from client, total=47
+[info] [server] conn_id=1 read 28 bytes from client, total=28
+[info] [server] conn_id=1 read 73 bytes from client, total=73
+[info] [server] conn_id=1 read 15 bytes from client, total=15
+[info] [server] conn_id=1 read 120 bytes from client, total=120
+[info] [server] conn_id=1 read 137 bytes from client, total=257
+[info] [server] conn_id=1 read 115 bytes from client, total=372
+[info] [server] conn_id=1 read 115 bytes from client, total=487
+[info] [server] conn_id=1 stream=71 upstream EOF
+[info] [server] conn_id=1 read 62 bytes from client, total=62
+[info] [server] conn_id=1 read 20 bytes from client, total=82
+[info] [server] conn_id=1 stream=69 upstream EOF
+[info] [server] conn_id=1 stream=81 upstream EOF
+[info] [server] conn_id=1 stream=59 upstream EOF
+[info] [server] conn_id=1 stream=75 upstream EOF
+[info] [server] conn_id=1 stream=79 upstream EOF
+[info] [server] conn_id=1 stream=51 upstream EOF
+[info] [server] conn_id=1 read 121 bytes from client, total=121
+[info] [server] conn_id=1 read 96 bytes from client, total=96
+[info] [server] conn_id=1 read 49 bytes from client, total=145
+[info] [server] conn_id=1 read 54 bytes from client, total=199
+[info] [server] conn_id=1 read 45 bytes from client, total=244
+[info] [server] conn_id=1 read 17 bytes from client, total=261
+[info] [server] conn_id=1 read 60 bytes from client, total=60
+[info] [server] conn_id=1 read 52 bytes from client, total=52
+[info] [server] conn_id=1 stream=77 upstream EOF
+[info] [server] conn_id=1 read 18 bytes from client, total=18
+[info] [server] conn_id=1 read 9 bytes from client, total=9
+[info] [server] conn_id=1 stream=73 upstream EOF
+[info] [server] conn_id=1 stream=39 upstream EOF
+[info] [server] conn_id=1 read 120 bytes from client, total=120
+[info] [server] conn_id=1 read 136 bytes from client, total=136
+[info] [server] conn_id=1 read 170 bytes from client, total=170
+[info] [server] conn_id=1 read 41 bytes from client, total=41
+[info] [server] conn_id=1 read 11 bytes from client, total=11
+[info] [server] conn_id=1 read 58 bytes from client, total=58
+[info] [server] conn_id=1 read 22 bytes from client, total=22
+[info] [server] conn_id=1 stream=89 upstream EOF
+[info] [server] conn_id=1 stream=93 upstream EOF
+[info] [server] conn_id=1 stream=85 upstream EOF
+[info] [server] conn_id=1 stream=87 upstream EOF
+[info] [server] conn_id=1 read 48 bytes from client, total=48
+[info] [server] conn_id=1 read 29 bytes from client, total=29
+[info] [server] conn_id=1 read 56 bytes from client, total=56
+[info] [server] conn_id=1 read 15 bytes from client, total=15
+[info] [server] conn_id=1 read 119 bytes from client, total=119
+[info] [server] conn_id=1 read 91 bytes from client, total=91
+[info] [server] conn_id=1 read 144 bytes from client, total=235
+[info] [server] conn_id=1 stream=83 upstream EOF
+[info] [server] conn_id=1 stream=97 upstream EOF
+[info] [server] conn_id=1 stream=95 upstream EOF
+[info] [server] conn_id=1 stream=101 upstream EOF
+[info] [server] conn_id=1 read 56 bytes from client, total=56
+[info] [server] conn_id=1 read 150 bytes from client, total=150
+[info] [server] conn_id=1 read 100 bytes from client, total=250
+[info] [server] conn_id=1 read 48 bytes from client, total=298
+[info] [server] conn_id=1 stream=91 upstream EOF
+[info] [server] conn_id=1 read 56 bytes from client, total=56
+[info] [server] conn_id=1 read 23 bytes from client, total=23
+[info] [server] conn_id=1 stream=99 upstream EOF
+[info] [server] conn_id=1 stream=5 upstream EOF
+[info] [server] conn_id=1 stream=7 upstream EOF
+[info] [server] conn_id=1 stream=3 upstream EOF
+[info] [server] conn_id=1 stream=13 upstream EOF
+[info] [server] conn_id=1 stream=17 upstream EOF
+[info] [server] conn_id=1 stream=15 upstream EOF
+[info] [server] conn_id=1 stream=19 upstream EOF
+[info] [server] conn_id=1 stream=9 upstream EOF
+[info] [server] conn_id=1 stream=23 upstream EOF
+[info] [server] conn_id=1 stream=21 upstream EOF
+[info] [server] conn_id=1 stream=27 upstream EOF
+[info] [server] conn_id=1 stream=11 upstream EOF
+[info] [server] conn_id=1 stream=33 upstream EOF
+[info] [server] conn_id=1 stream=31 upstream EOF
+[info] [server] conn_id=1 stream=35 upstream EOF
+[info] [server] conn_id=1 stream=29 upstream EOF
