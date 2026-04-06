@@ -81,9 +81,9 @@ enum class State {
 struct Peer {
     int32_t  h2_stream_id = 0;
     proxy::socket_t sock  = proxy::kInvalidSocket;
-    State state = State::DnsPending;
+    State state = State::Connecting;  // Start in Connecting; DnsPending support not yet implemented
 
-    // DNS resolution (for async DNS)
+    // DNS resolution (for async DNS) - not yet implemented
     int64_t dns_job_id = -1;  // Job ID from DnsResolver, or -1 if not pending DNS
 
     // Buffer pool reference (set by caller, not owned)

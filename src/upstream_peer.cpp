@@ -436,26 +436,11 @@ bool process_read(Peer& peer) {
                 break;
             }
         } else {
-            // Fallback: no pool available, use stack buffer (old behavior)
-            std::array<uint8_t, kTunnelIoChunkSize> buf{};
-#ifdef _WIN32
-            ret = ::recv(peer.sock,
-                        reinterpret_cast<char*>(buf.data()),
-                        static_cast<int>(buf.size()), 0);
-#else
-            ret = static_cast<int>(::recv(peer.sock, buf.data(), buf.size(), 0));
-#endif
-            if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) {
-                // Would block - no more data available (ET mode)
-                break;
-            }
-            if (ret <= 0) return false;  // EOF or error
-            // Fallback: create vector (this is the old code path)
-            std::vector<uint8_t> vec(buf.begin(), buf.begin() + ret);
-            peer.pending_downlink.total_bytes += vec.size();
-            // Note: without pool, we can't use the new push() signature
-            // This requires reverting to old behavior temporarily
-            break;  // For now, just break after first read without pool
+            // No pool available - shouldn't happen since buffer_pool is always provided
+            // by ServerConnection, but if it does we can't proceed safely
+            PROXY_LOG(Warn, "[upstream] stream=" << peer.h2_stream_id
+                            << " no buffer pool available, stopping reads");
+            break;
         }
     }
     return true;
