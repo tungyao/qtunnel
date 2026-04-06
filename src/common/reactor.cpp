@@ -190,7 +190,7 @@ int Reactor::wait(int timeout_ms, std::string& error) {
     const int max_events = static_cast<int>(epoll_events_.capacity());
     epoll_events_.resize(max_events);
 
-    const int ret = epoll_wait(epoll_fd_, reinterpret_cast<epoll_event*>(epoll_events_.data()), max_events, timeout_ms);
+    const int ret = epoll_wait(epoll_fd_, epoll_events_.data(), max_events, timeout_ms);
     if (ret < 0) {
         if (errno == EINTR) {
             ready_count_ = 0;
@@ -214,7 +214,7 @@ socket_t Reactor::ready_fd(int index) const {
     return kInvalidSocket;
 #else
     if (index >= 0 && index < ready_count_) {
-        return static_cast<socket_t>(epoll_events_[index].fd);
+        return static_cast<socket_t>(epoll_events_[index].data.u32);
     }
     return kInvalidSocket;
 #endif
@@ -252,6 +252,19 @@ EventFlags Reactor::ready_events(int index) const {
 
 void Reactor::clear_ready() {
     ready_count_ = 0;
+}
+
+bool Reactor::arm(socket_t fd, EventFlags events, std::string& error) {
+    auto it = registered_.find(fd);
+    if (it != registered_.end() && it->second == events) return true;
+    bool ok = (it == registered_.end()) ? add(fd, events, error) : modify(fd, events, error);
+    if (ok) registered_[fd] = events;
+    return ok;
+}
+
+bool Reactor::disarm(socket_t fd, std::string& error) {
+    if (registered_.erase(fd) == 0) return true;
+    return remove(fd, error);
 }
 
 } // namespace proxy

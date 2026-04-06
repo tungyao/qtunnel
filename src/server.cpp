@@ -1,5 +1,6 @@
 #include "common/logging.h"
 #include "common/reactor.h"
+#include "common/socks5.h"
 #include "server_connection.h"
 #include "server_shared.h"
 
@@ -8,6 +9,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <atomic>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -30,6 +33,23 @@ using proxy::Reactor;
 using proxy::set_log_level;
 using proxy::set_socket_nonblocking;
 using proxy::socket_t;
+
+std::atomic<std::uint64_t> g_connection_id{0};
+
+std::string format_client_addr(sockaddr_storage* ss) {
+    char buf[128] = {};
+    std::uint16_t port = 0;
+    if (ss->ss_family == AF_INET6) {
+        auto* addr6 = reinterpret_cast<sockaddr_in6*>(ss);
+        inet_ntop(AF_INET6, &addr6->sin6_addr, buf, sizeof(buf));
+        port = ntohs(addr6->sin6_port);
+    } else if (ss->ss_family == AF_INET) {
+        auto* addr4 = reinterpret_cast<sockaddr_in*>(ss);
+        inet_ntop(AF_INET, &addr4->sin_addr, buf, sizeof(buf));
+        port = ntohs(addr4->sin_port);
+    }
+    return std::string(buf) + ":" + std::to_string(port);
+}
 
 bool is_socket_would_block(int code) {
 #ifdef _WIN32
@@ -86,6 +106,10 @@ class ServerRuntime {
 public:
     explicit ServerRuntime(ServerConfig config) : config_(std::move(config)) {}
 
+    ~ServerRuntime() {
+        if (listener_ != kInvalidSocket) close_socket(listener_);
+    }
+
     bool init() {
         listener_ = make_listener(config_.listen_port);
         if (listener_ == kInvalidSocket) {
@@ -101,51 +125,51 @@ public:
             PROXY_LOG(Error, "[server] reactor init failed: " << error);
             return false;
         }
+        // Register listener fd
+        fd_owners_[listener_] = FdOwner{FdOwner::Kind::Listener, nullptr, 0};
+        if (!reactor_.arm(listener_, EventFlags::Readable, error)) {
+            PROXY_LOG(Error, "[server] reactor arm listener failed: " << error);
+            return false;
+        }
         return true;
-    }
-
-    ~ServerRuntime() {
-        if (listener_ != kInvalidSocket) close_socket(listener_);
     }
 
     void run() {
         while (true) {
-            std::map<socket_t, EventFlags> desired;
-            std::map<socket_t, SocketBinding> bindings;
-            desired[listener_] = EventFlags::Readable;
-            bindings[listener_] = SocketBinding{SocketBinding::Kind::Listener, nullptr, 0};
-
-            for (auto& kv : connections_) {
-                kv.second->collect_watches(desired, bindings);
-            }
-
-            if (!sync_reactor(desired)) {
-                PROXY_LOG(Error, "[server] sync_reactor failed, runtime exiting");
-                return;
-            }
-
             std::string wait_error;
             const int ready = reactor_.wait(-1, wait_error);
             if (ready < 0) {
+                if (wait_error.find("Interrupted") != std::string::npos ||
+                    wait_error.find("EINTR") != std::string::npos) continue;
                 PROXY_LOG(Error, "[server] reactor wait failed: " << wait_error);
                 return;
             }
 
+            // Dispatch events using fd_owners_ direct lookup
             for (int i = 0; i < ready; ++i) {
                 const socket_t fd = reactor_.ready_fd(i);
                 const EventFlags events = reactor_.ready_events(i);
-                const auto binding_it = bindings.find(fd);
-                if (binding_it == bindings.end()) continue;
+                auto it = fd_owners_.find(fd);
+                if (it == fd_owners_.end()) continue;
 
                 const bool readable = (events & EventFlags::Readable) != EventFlags::None;
                 const bool writable = (events & EventFlags::Writable) != EventFlags::None;
-                if (binding_it->second.kind == SocketBinding::Kind::Listener) {
+                const FdOwner& owner = it->second;
+
+                if (owner.kind == FdOwner::Kind::Listener) {
                     accept_ready_clients();
-                } else if (binding_it->second.kind == SocketBinding::Kind::Client) {
-                    binding_it->second.connection->on_client_event(readable, writable, false, false);
+                } else if (owner.kind == FdOwner::Kind::Client) {
+                    owner.conn->on_client_event(readable, writable);
                 } else {
-                    binding_it->second.connection->on_upstream_event(binding_it->second.stream_id, readable, writable,
-                                                                     false, false);
+                    owner.conn->on_upstream_event(owner.h2_stream_id, readable, writable);
+                }
+            }
+
+            // After all I/O: flush H2 session sends and rearm upstream interests
+            for (auto& kv : connections_) {
+                if (!kv.second->closed()) {
+                    kv.second->drive_session_send();
+                    kv.second->rearm_all_upstreams();
                 }
             }
 
@@ -154,38 +178,21 @@ public:
     }
 
 private:
-    bool sync_reactor(const std::map<socket_t, EventFlags>& desired) {
-        std::string error;
-        for (auto it = watched_.begin(); it != watched_.end();) {
-            if (desired.find(it->first) == desired.end()) {
-                if (!reactor_.remove(it->first, error)) {
-                    PROXY_LOG(Error, "[server] reactor remove failed fd=" << it->first << " error=" << error);
-                    return false;
-                }
-                it = watched_.erase(it);
-            } else {
-                ++it;
+    RuntimeHooks make_hooks() {
+        return RuntimeHooks{
+            [this]() -> Reactor& { return reactor_; },
+            [this](socket_t fd, ServerConnection* conn, int32_t h2_stream_id) {
+                fd_owners_[fd] = FdOwner{FdOwner::Kind::Upstream, conn, h2_stream_id};
+                // Initial arm: readable + writable for connect-in-progress
+                std::string err;
+                reactor_.arm(fd, EventFlags::Readable | EventFlags::Writable, err);
+            },
+            [this](socket_t fd) {
+                std::string err;
+                reactor_.disarm(fd, err);
+                fd_owners_.erase(fd);
             }
-        }
-
-        for (const auto& kv : desired) {
-            const auto it = watched_.find(kv.first);
-            if (it == watched_.end()) {
-                if (!reactor_.add(kv.first, kv.second, error)) {
-                    PROXY_LOG(Error, "[server] reactor add failed fd=" << kv.first << " error=" << error);
-                    return false;
-                }
-                watched_[kv.first] = kv.second;
-            } else if (it->second != kv.second) {
-                if (!reactor_.modify(kv.first, kv.second, error)) {
-                    PROXY_LOG(Error, "[server] reactor modify failed fd=" << kv.first << " error=" << error);
-                    return false;
-                }
-                it->second = kv.second;
-            }
-        }
-
-        return true;
+        };
     }
 
     void accept_ready_clients() {
@@ -200,26 +207,50 @@ private:
                 return;
             }
 
-            auto connection = std::make_unique<ServerConnection>(client, config_);
-            if (!connection->start()) {
-                PROXY_LOG(Error, "[server] failed to start accepted connection");
+            std::string client_addr = format_client_addr(&ss);
+            std::uint64_t conn_id = ++g_connection_id;
+            PROXY_LOG(Info, "[server] client connected conn_id=" << conn_id << " from=" << client_addr);
+
+            std::string err;
+            if (!set_socket_nonblocking(client, true, err)) {
+                PROXY_LOG(Error, "[server] set client nonblocking failed: " << err);
+                close_socket(client);
                 continue;
             }
-            connections_[connection->client_socket()] = std::move(connection);
+
+            auto connection = std::make_unique<ServerConnection>(client, config_, make_hooks(), conn_id, client_addr);
+            if (!connection->start()) {
+                PROXY_LOG(Error, "[server] failed to start accepted connection conn_id=" << conn_id);
+                continue;
+            }
+
+            socket_t fd = connection->client_fd();
+            fd_owners_[fd] = FdOwner{FdOwner::Kind::Client, connection.get(), 0};
+            if (!reactor_.arm(fd, EventFlags::Readable | EventFlags::Writable, err)) {
+                PROXY_LOG(Error, "[server] reactor arm client failed: " << err);
+                continue;
+            }
+            connections_[fd] = std::move(connection);
+            PROXY_LOG(Info, "[server] client registered fd=" << fd << " conn_id=" << conn_id);
         }
     }
 
     void cleanup_closed_connections() {
         for (auto it = connections_.begin(); it != connections_.end();) {
-            if (!it->second->closed()) ++it;
-            else it = connections_.erase(it);
+            if (!it->second->closed()) { ++it; continue; }
+            socket_t fd = it->first;
+            PROXY_LOG(Info, "[server] cleaning up closed connection fd=" << fd);
+            std::string err;
+            reactor_.disarm(fd, err);
+            fd_owners_.erase(fd);
+            it = connections_.erase(it);
         }
     }
 
     ServerConfig config_;
     socket_t listener_ = kInvalidSocket;
     Reactor reactor_;
-    std::map<socket_t, EventFlags> watched_;
+    std::unordered_map<socket_t, FdOwner> fd_owners_;
     std::map<socket_t, std::unique_ptr<ServerConnection>> connections_;
 };
 
@@ -279,6 +310,8 @@ int main(int argc, char** argv) {
 
     const ServerConfig config = parse_args(argc, argv);
     set_log_level(config.log_level);
+
+    PROXY_LOG(Info, "server starting log_level=" << proxy::log_level_name(config.log_level));
 
     ServerRuntime runtime(config);
     if (!runtime.init()) return 1;

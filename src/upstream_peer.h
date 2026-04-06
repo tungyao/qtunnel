@@ -2,16 +2,52 @@
 
 #include "common/reactor.h"
 #include "common/tls_wrapper.h"
-#include "common/tunnel_protocol.h"
 #include "server_shared.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <deque>
 #include <functional>
 #include <string>
 #include <vector>
 
 namespace server_upstream {
+
+struct ChunkQueue {
+    static constexpr std::size_t kHighWater = 512 * 1024;
+    static constexpr std::size_t kLowWater  = 128 * 1024;
+
+    std::deque<std::vector<uint8_t>> chunks;
+    std::size_t total_bytes  = 0;
+    std::size_t front_offset = 0;
+
+    void push(std::vector<uint8_t> chunk) {
+        total_bytes += chunk.size();
+        chunks.push_back(std::move(chunk));
+    }
+
+    // Consume up to `want` bytes into dst. Returns bytes consumed.
+    std::size_t consume(uint8_t* dst, std::size_t want) {
+        if (chunks.empty() || want == 0) return 0;
+        auto& front = chunks.front();
+        const std::size_t avail = front.size() - front_offset;
+        const std::size_t n = (want < avail) ? want : avail;
+        std::memcpy(dst, front.data() + front_offset, n);
+        front_offset += n;
+        total_bytes  -= n;
+        if (front_offset >= front.size()) {
+            chunks.pop_front();
+            front_offset = 0;
+        }
+        return n;
+    }
+
+    bool empty()            const { return total_bytes == 0; }
+    bool above_high_water() const { return total_bytes >= kHighWater; }
+    bool below_low_water()  const { return total_bytes <= kLowWater; }
+};
 
 enum class State {
     Connecting,
@@ -25,35 +61,45 @@ enum class State {
 };
 
 struct Peer {
-    std::uint32_t id = 0;
-    proxy::socket_t sock = proxy::kInvalidSocket;
+    int32_t  h2_stream_id = 0;
+    proxy::socket_t sock  = proxy::kInvalidSocket;
     State state = State::Connecting;
-    std::uint8_t requested_atyp = 0;
-    std::string requested_host;
-    std::uint16_t requested_port = 0;
-    bool use_socks5 = false;
-    std::vector<std::uint8_t> pending_uplink;
-    std::size_t pending_uplink_offset = 0;
-    std::vector<std::uint8_t> control_out;
-    std::size_t control_out_offset = 0;
-    std::vector<std::uint8_t> control_in;
-    std::size_t control_expected = 0;
-};
 
-using DownlinkSink =
-    std::function<void(proxy::FrameType, std::uint32_t, const std::vector<std::uint8_t>&)>;
+    // Downstream (upstream -> client)
+    ChunkQueue pending_downlink;
+    bool upstream_eof      = false;  // upstream closed, drain then send END_STREAM
+    bool downlink_deferred = false;  // nghttp2 data_provider returned DEFERRED
+
+    // Upstream (client -> upstream)
+    std::vector<uint8_t> pending_uplink;
+    std::size_t pending_uplink_offset = 0;
+    std::size_t unconsumed_uplink_bytes = 0;  // bytes received but not yet written to upstream
+
+    // SOCKS5 fields
+    bool use_socks5 = false;
+    std::uint8_t  requested_atyp = 0;
+    std::string   requested_host;
+    std::uint16_t requested_port = 0;
+    std::vector<uint8_t> control_out;
+    std::size_t          control_out_offset = 0;
+    std::vector<uint8_t> control_in;
+    std::size_t          control_expected = 0;
+};
 
 proxy::EventFlags interest(const Peer& peer);
 
-bool start_connect(const ServerConfig& config, std::uint32_t stream_id, std::uint8_t requested_atyp,
-                   const std::string& requested_host, std::uint16_t requested_port, Peer& peer_out,
-                   bool& connected, std::string& error);
+bool start_connect(const ServerConfig& config, int32_t h2_stream_id,
+                   std::uint8_t requested_atyp,
+                   const std::string& requested_host, std::uint16_t requested_port,
+                   Peer& peer_out, bool& connected, std::string& error);
 
-bool finish_nonblocking_connect(Peer& peer, const DownlinkSink& downlink_sink);
-bool process_write(Peer& peer, const DownlinkSink& downlink_sink);
-bool process_read(Peer& peer, const DownlinkSink& downlink_sink);
+bool finish_nonblocking_connect(Peer& peer, bool& send_open_ok, std::string& error);
+bool process_write(Peer& peer);          // returns false on fatal error
+bool process_read(Peer& peer);           // returns false on EOF/error
 
 void close(Peer& peer);
-std::string describe_route(const ServerConfig& config, const std::string& requested_host, std::uint16_t requested_port);
+std::string describe_route(const ServerConfig& config,
+                            const std::string& requested_host,
+                            std::uint16_t requested_port);
 
 } // namespace server_upstream

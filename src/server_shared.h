@@ -4,6 +4,7 @@
 #include "common/reactor.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 struct ServerConfig {
@@ -22,18 +23,22 @@ struct ServerConfig {
     std::string key_file;
     std::string auth_password;
     proxy::LogLevel log_level = proxy::LogLevel::Info;
+    int worker_id = -1;
+    int worker_count = 0;
 };
 
 class ServerConnection;
 
-struct SocketBinding {
-    enum class Kind {
-        Listener,
-        Client,
-        Upstream
-    };
-
+struct FdOwner {
+    enum class Kind { Listener, Client, Upstream };
     Kind kind = Kind::Listener;
-    ServerConnection* connection = nullptr;
-    std::uint32_t stream_id = 0;
+    ServerConnection* conn = nullptr;
+    int32_t h2_stream_id = 0;  // valid when kind == Upstream
+};
+
+// Callbacks from ServerConnection into ServerRuntime for fd lifecycle management
+struct RuntimeHooks {
+    std::function<proxy::Reactor&()> get_reactor;
+    std::function<void(proxy::socket_t, ServerConnection*, int32_t)> register_upstream;
+    std::function<void(proxy::socket_t)> unregister_fd;
 };

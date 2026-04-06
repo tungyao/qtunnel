@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -12,6 +13,7 @@
 #include <mstcpip.h>
 #else
 #include <fcntl.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -63,6 +65,10 @@ public:
     bool modify(socket_t fd, EventFlags events, std::string& error);
     bool remove(socket_t fd, std::string& error);
 
+    // Idempotent arm: only calls epoll_ctl when flags actually change
+    bool arm(socket_t fd, EventFlags events, std::string& error);
+    bool disarm(socket_t fd, std::string& error);
+
     int wait(int timeout_ms, std::string& error);
 
     int ready_count() const { return ready_count_; }
@@ -73,6 +79,7 @@ public:
     void clear_ready();
 
 private:
+    std::unordered_map<socket_t, EventFlags> registered_;
 #ifdef _WIN32
     struct PollFd {
         WSAPOLLFD pollfd;
@@ -81,11 +88,7 @@ private:
     std::vector<PollFd> poll_fds_;
 #else
     int epoll_fd_ = -1;
-    struct EpollEvent {
-        std::uint32_t events;
-        std::uint32_t fd;
-    };
-    std::vector<EpollEvent> epoll_events_;
+    std::vector<struct epoll_event> epoll_events_;
 #endif
 
     int ready_count_ = 0;

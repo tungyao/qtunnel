@@ -13,50 +13,76 @@
 
 class ServerConnection {
 public:
-    ServerConnection(proxy::socket_t accepted_socket, ServerConfig config);
+    ServerConnection(proxy::socket_t accepted_socket,
+                     ServerConfig config,
+                     RuntimeHooks hooks,
+                     std::uint64_t conn_id,
+                     std::string client_addr);
     ~ServerConnection();
 
     ServerConnection(const ServerConnection&) = delete;
     ServerConnection& operator=(const ServerConnection&) = delete;
 
     bool start();
-    bool closed() const;
-    proxy::socket_t client_socket() const;
+    bool closed() const { return mode_ == Mode::Closed; }
+    proxy::socket_t client_fd() const { return tls_.raw_socket(); }
 
-    void collect_watches(std::map<proxy::socket_t, proxy::EventFlags>& desired,
-                         std::map<proxy::socket_t, SocketBinding>& bindings);
-    void on_client_event(bool readable, bool writable, bool error, bool hangup);
-    void on_upstream_event(std::uint32_t stream_id, bool readable, bool writable, bool error, bool hangup);
+    // Called by ServerRuntime on epoll events
+    void on_client_event(bool readable, bool writable);
+    void on_upstream_event(int32_t h2_stream_id, bool readable, bool writable);
+
+    // Called by ServerRuntime after all I/O events each loop iteration
+    void drive_session_send();
+    void rearm_all_upstreams();
 
 private:
     enum class Mode { Handshaking, Http1, Http2, Closed };
 
-    bool client_wants_read() const;
-    bool client_wants_write() const;
-    bool has_pending_tls_output() const;
-    void note_tls_status(proxy::TlsSocket::IoStatus status);
+    // TLS handshake
     void drive_tls_handshake();
-    void flush_tls_output();
+
+    // HTTP/1 fallback (static page only)
     void read_http1_request();
-    void read_http2_frames();
-    void start_upstream_connect(std::uint32_t stream_id, std::uint8_t atyp,
-                                const std::string& requested_host, std::uint16_t requested_port);
-    void enqueue_downlink(proxy::FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload);
-    void handle_tunnel_stream_data(std::uint32_t stream_id, const std::vector<std::uint8_t>& payload);
-    void close_logical_stream(std::uint32_t stream_id, bool notify_client);
+    void flush_http1_response();
+
+    // HTTP/2
+    void read_h2_frames();
+
+    // Called by Http2SessionDriver callbacks
+    void on_connect_request(int32_t h2_stream_id,
+                             const std::string& host, uint16_t port);
+    void on_upload_data(int32_t h2_stream_id,
+                         const uint8_t* data, std::size_t len);
+    void on_h2_stream_close(int32_t h2_stream_id);
+
+    // Upstream lifecycle
+    void close_stream_only(int32_t h2_stream_id);
     void close_all_upstreams();
     void close_connection();
+    void rearm_upstream(int32_t h2_stream_id, const server_upstream::Peer& peer);
 
-    proxy::socket_t accepted_socket_ = proxy::kInvalidSocket;
-    ServerConfig config_;
+    // TLS write: used as send_fn_ injected into Http2SessionDriver
+    SendResult tls_send(const uint8_t* data, std::size_t len, std::size_t& wrote);
+
+    proxy::socket_t  accepted_socket_ = proxy::kInvalidSocket;
+    ServerConfig     config_;
+    RuntimeHooks     hooks_;
     proxy::TlsSocket tls_;
     Http2SessionDriver h2_driver_;
-    std::map<std::uint32_t, server_upstream::Peer> streams_;
-    std::vector<std::uint8_t> tls_out_;
-    std::size_t tls_out_offset_ = 0;
+    std::uint64_t    conn_id_ = 0;
+    std::string      client_addr_;
+
+    std::map<int32_t, server_upstream::Peer> streams_;
+
+    // HTTP/1 state (for non-H2 clients, serve static page only)
     std::string http1_in_;
-    Mode mode_;
+    std::vector<uint8_t> http1_out_;
+    std::size_t http1_out_offset_ = 0;
     bool http1_response_started_ = false;
-    bool tls_need_read_ = false;
+
+    // TLS write state
     bool tls_need_write_ = false;
+    bool tls_need_read_  = false;
+
+    Mode mode_ = Mode::Closed;
 };

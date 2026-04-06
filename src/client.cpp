@@ -6,8 +6,8 @@
 #define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -16,11 +16,12 @@
 #include <cstring>
 #include <cstdint>
 #include <deque>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <exception>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -37,21 +38,15 @@
 
 namespace {
 
-constexpr std::size_t kTunnelIoChunkSize = 256 * 1024;
-constexpr std::int32_t kHttp2WindowSize = 16 * 1024 * 1024;
+constexpr std::size_t kTunnelIoChunkSize   = 256 * 1024;
+constexpr std::int32_t kHttp2WindowSize    = 16 * 1024 * 1024;
 constexpr std::uint32_t kHttp2MaxFrameSize = 1024 * 1024;
 constexpr std::size_t kMaxBufferedDownlinkBytes = 32 * 1024 * 1024;
 
 using proxy::close_socket;
-using proxy::consume_frames;
-using proxy::decode_open_fail;
-using proxy::encode_open_request;
 using proxy::EventDispatcher;
 using proxy::EventNotifier;
-using proxy::FrameHeader;
-using proxy::FrameType;
 using proxy::kInvalidSocket;
-using proxy::parse_frames;
 using proxy::parse_log_level;
 using proxy::perform_socks5_handshake;
 using proxy::send_socks5_reply;
@@ -76,11 +71,6 @@ struct ClientConfig {
     LogLevel log_level = LogLevel::Info;
 };
 
-struct HeaderField {
-    std::string name;
-    std::string value;
-};
-
 enum class LocalProxyProtocol {
     Socks5,
     HttpConnect,
@@ -103,44 +93,18 @@ nghttp2_nv make_nv(const std::string& name, const std::string& value) {
     return nv;
 }
 
-std::vector<HeaderField> make_request_header_fields(const ClientConfig& cfg, const std::string& method,
-                                                    const std::string& path, const std::string& content_type,
-                                                    bool has_body) {
-    std::vector<HeaderField> fields;
-    fields.push_back({":method", method});
-    fields.push_back({":scheme", "https"});
-    fields.push_back({":authority", cfg.server_host + ":" + std::to_string(cfg.server_port)});
-    fields.push_back({":path", path});
-    fields.push_back({"user-agent", "qtunnel-h2-client/1.0"});
-    fields.push_back({"accept", "*/*"});
-    if (!cfg.auth_password.empty()) {
-        fields.push_back({"x-tunnel-auth", cfg.auth_password});
-    }
-    if (has_body) {
-        fields.push_back({"content-type", content_type});
-    }
-
-    return fields;
-}
-
 bool parse_host_port(const std::string& text, std::string& host, std::uint16_t& port) {
-    if (text.empty()) {
-        return false;
-    }
+    if (text.empty()) return false;
     if (text.front() == '[') {
         const auto end = text.find(']');
         const auto colon = text.rfind(':');
-        if (end == std::string::npos || colon == std::string::npos || colon <= end) {
-            return false;
-        }
+        if (end == std::string::npos || colon == std::string::npos || colon <= end) return false;
         host = text.substr(1, end - 1);
         port = static_cast<std::uint16_t>(std::stoi(text.substr(colon + 1)));
         return true;
     }
     const auto colon = text.rfind(':');
-    if (colon == std::string::npos) {
-        return false;
-    }
+    if (colon == std::string::npos) return false;
     host = text.substr(0, colon);
     port = static_cast<std::uint16_t>(std::stoi(text.substr(colon + 1)));
     return !host.empty();
@@ -152,32 +116,23 @@ std::string describe_socks5_target(const Socks5Request& req) {
 
 const char* socks5_atyp_name(std::uint8_t atyp) {
     switch (atyp) {
-        case 0x01:
-            return "ipv4";
-        case 0x03:
-            return "domain";
-        case 0x04:
-            return "ipv6";
-        default:
-            return "unknown";
+        case 0x01: return "ipv4";
+        case 0x03: return "domain";
+        case 0x04: return "ipv6";
+        default:   return "unknown";
     }
 }
 
 std::string ascii_lower(std::string text) {
-    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return text;
 }
 
 std::string trim_ascii(std::string text) {
-    auto not_space = [](unsigned char ch) {
-        return !std::isspace(ch);
-    };
+    auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
     auto begin = std::find_if(text.begin(), text.end(), not_space);
-    if (begin == text.end()) {
-        return {};
-    }
+    if (begin == text.end()) return {};
     auto end = std::find_if(text.rbegin(), text.rend(), not_space).base();
     return std::string(begin, end);
 }
@@ -199,17 +154,14 @@ void signal_notifier(EventNotifier& notifier, const char* owner, const char* act
 
 std::uint8_t detect_atyp_from_host(const std::string& host) {
     in_addr ipv4{};
-    if (::inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
-        return 0x01;
-    }
+    if (::inet_pton(AF_INET, host.c_str(), &ipv4) == 1) return 0x01;
     in6_addr ipv6{};
-    if (::inet_pton(AF_INET6, host.c_str(), &ipv6) == 1) {
-        return 0x04;
-    }
+    if (::inet_pton(AF_INET6, host.c_str(), &ipv6) == 1) return 0x04;
     return 0x03;
 }
 
-bool recv_http_headers(socket_t sock, std::string& raw_request, std::size_t& header_end, std::string& error) {
+bool recv_http_headers(socket_t sock, std::string& raw_request, std::size_t& header_end,
+                       std::string& error) {
     raw_request.clear();
     header_end = std::string::npos;
     constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
@@ -220,90 +172,55 @@ bool recv_http_headers(socket_t sock, std::string& raw_request, std::size_t& hea
 #else
         const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
 #endif
-        if (ret == 0) {
-            error = "HTTP 客户端已断开";
-            return false;
-        }
-        if (ret < 0) {
-            error = "读取 HTTP 请求头失败";
-            return false;
-        }
+        if (ret == 0) { error = "HTTP 客户端已断开"; return false; }
+        if (ret < 0)  { error = "读取 HTTP 请求头失败"; return false; }
         raw_request.append(buf.data(), static_cast<std::size_t>(ret));
         header_end = raw_request.find("\r\n\r\n");
-        if (header_end != std::string::npos) {
-            return true;
-        }
+        if (header_end != std::string::npos) return true;
     }
-
     error = "HTTP 请求头过大";
     return false;
 }
 
-bool parse_http_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std::string& error) {
+bool parse_http_proxy_request(socket_t sock, AcceptedProxyRequest& accepted,
+                               std::string& error) {
     std::string raw_request;
     std::size_t header_end = std::string::npos;
-    if (!recv_http_headers(sock, raw_request, header_end, error)) {
-        return false;
-    }
-
-    if (header_end == std::string::npos) {
-        error = "HTTP 请求头不完整";
-        return false;
-    }
+    if (!recv_http_headers(sock, raw_request, header_end, error)) return false;
+    if (header_end == std::string::npos) { error = "HTTP 请求头不完整"; return false; }
 
     std::istringstream stream(raw_request.substr(0, header_end));
     std::string request_line;
-    if (!std::getline(stream, request_line)) {
-        error = "HTTP 请求行为空";
-        return false;
-    }
-    if (!request_line.empty() && request_line.back() == '\r') {
-        request_line.pop_back();
-    }
+    if (!std::getline(stream, request_line)) { error = "HTTP 请求行为空"; return false; }
+    if (!request_line.empty() && request_line.back() == '\r') request_line.pop_back();
 
-    std::istringstream request_line_stream(request_line);
-    std::string method;
-    std::string target_text;
-    std::string version;
-    request_line_stream >> method >> target_text >> version;
+    std::istringstream rls(request_line);
+    std::string method, target_text, version;
+    rls >> method >> target_text >> version;
     if (method.empty() || target_text.empty() || version.empty()) {
-        error = "HTTP 请求行格式错误";
-        return false;
+        error = "HTTP 请求行格式错误"; return false;
     }
 
     std::vector<std::pair<std::string, std::string>> headers;
     std::string host_header;
     for (std::string line; std::getline(stream, line);) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (line.empty()) {
-            continue;
-        }
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
         const auto colon = line.find(':');
-        if (colon == std::string::npos) {
-            error = "HTTP 请求头格式错误";
-            return false;
-        }
-        std::string name = trim_ascii(line.substr(0, colon));
+        if (colon == std::string::npos) { error = "HTTP 请求头格式错误"; return false; }
+        std::string name  = trim_ascii(line.substr(0, colon));
         std::string value = trim_ascii(line.substr(colon + 1));
-        if (ascii_lower(name) == "host") {
-            host_header = value;
-        }
+        if (ascii_lower(name) == "host") host_header = value;
         headers.emplace_back(std::move(name), std::move(value));
     }
 
     Socks5Request req;
     if (ascii_lower(method) == "connect") {
-        std::string connect_target = target_text;
-        if (!parse_host_port(connect_target, req.host, req.port)) {
-            const auto colon = connect_target.rfind(':');
-            if (colon == std::string::npos) {
-                error = "CONNECT 缺少目标端口";
-                return false;
-            }
-            req.host = connect_target.substr(0, colon);
-            req.port = static_cast<std::uint16_t>(std::stoi(connect_target.substr(colon + 1)));
+        if (!parse_host_port(target_text, req.host, req.port)) {
+            const auto c = target_text.rfind(':');
+            if (c == std::string::npos) { error = "CONNECT 缺少目标端口"; return false; }
+            req.host = target_text.substr(0, c);
+            req.port = static_cast<std::uint16_t>(std::stoi(target_text.substr(c + 1)));
         }
         req.atyp = detect_atyp_from_host(req.host);
         accepted.target = std::move(req);
@@ -315,59 +232,40 @@ bool parse_http_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std
     std::string remote_host;
     std::uint16_t remote_port = 80;
     std::string request_target = target_text;
-
     const std::string lowered_target = ascii_lower(target_text);
     if (lowered_target.rfind("http://", 0) == 0) {
         const std::string authority_and_path = target_text.substr(7);
         const auto slash = authority_and_path.find('/');
         const std::string authority = slash == std::string::npos
-            ? authority_and_path
-            : authority_and_path.substr(0, slash);
-        request_target = slash == std::string::npos
-            ? "/"
-            : authority_and_path.substr(slash);
+            ? authority_and_path : authority_and_path.substr(0, slash);
+        request_target = slash == std::string::npos ? "/" : authority_and_path.substr(slash);
         if (!parse_host_port(authority, remote_host, remote_port)) {
-            remote_host = authority;
-            remote_port = 80;
+            remote_host = authority; remote_port = 80;
         }
     } else {
-        if (host_header.empty()) {
-            error = "HTTP 代理请求缺少 Host";
-            return false;
-        }
+        if (host_header.empty()) { error = "HTTP 代理请求缺少 Host"; return false; }
         if (!parse_host_port(host_header, remote_host, remote_port)) {
-            remote_host = host_header;
-            remote_port = 80;
+            remote_host = host_header; remote_port = 80;
         }
     }
+    if (remote_host.empty()) { error = "无法解析 HTTP 目标主机"; return false; }
 
-    if (remote_host.empty()) {
-        error = "无法解析 HTTP 目标主机";
-        return false;
-    }
-
-    req.host = remote_host;
-    req.port = remote_port;
-    req.atyp = detect_atyp_from_host(req.host);
+    req.host  = remote_host;
+    req.port  = remote_port;
+    req.atyp  = detect_atyp_from_host(req.host);
 
     std::ostringstream rebuilt;
     rebuilt << method << " " << request_target << " " << version << "\r\n";
     bool has_host = false;
     for (const auto& header : headers) {
         const std::string lower_name = ascii_lower(header.first);
-        if (lower_name == "proxy-connection") {
-            continue;
-        }
-        if (lower_name == "host") {
-            has_host = true;
-        }
+        if (lower_name == "proxy-connection") continue;
+        if (lower_name == "host") has_host = true;
         rebuilt << header.first << ": " << header.second << "\r\n";
     }
     if (!has_host) {
         rebuilt << "Host: " << remote_host;
-        if (remote_port != 80) {
-            rebuilt << ":" << remote_port;
-        }
+        if (remote_port != 80) rebuilt << ":" << remote_port;
         rebuilt << "\r\n";
     }
     rebuilt << "\r\n";
@@ -386,7 +284,7 @@ bool parse_http_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std
 }
 
 bool send_http_proxy_response(socket_t sock, int status_code, const std::string& reason,
-                              const std::string& body = {}) {
+                               const std::string& body = {}) {
     std::ostringstream response;
     response << "HTTP/1.1 " << status_code << " " << reason << "\r\n";
     if (status_code == 200 && ascii_lower(reason) == "connection established") {
@@ -402,377 +300,207 @@ bool send_http_proxy_response(socket_t sock, int status_code, const std::string&
     return send_all_raw(sock, reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size(), error);
 }
 
-bool accept_local_proxy_request(socket_t sock, AcceptedProxyRequest& accepted, std::string& error) {
+bool accept_local_proxy_request(socket_t sock, AcceptedProxyRequest& accepted,
+                                 std::string& error) {
     unsigned char first_byte = 0;
 #ifdef _WIN32
     const int peeked = ::recv(sock, reinterpret_cast<char*>(&first_byte), 1, MSG_PEEK);
 #else
     const int peeked = static_cast<int>(::recv(sock, &first_byte, 1, MSG_PEEK));
 #endif
-    if (peeked == 0) {
-        error = "客户端已断开";
-        return false;
-    }
-    if (peeked < 0) {
-        error = "读取本地代理协议失败";
-        return false;
-    }
+    if (peeked == 0) { error = "客户端已断开"; return false; }
+    if (peeked < 0)  { error = "读取本地代理协议失败"; return false; }
 
     if (first_byte == 0x05) {
         accepted.protocol = LocalProxyProtocol::Socks5;
         accepted.initial_payload.clear();
-        const Socks5HandshakeStatus handshake_status = perform_socks5_handshake(sock, accepted.target, error);
-        return handshake_status == Socks5HandshakeStatus::Ok;
+        const Socks5HandshakeStatus hs = perform_socks5_handshake(sock, accepted.target, error);
+        return hs == Socks5HandshakeStatus::Ok;
     }
-
     if (std::isalpha(first_byte) != 0) {
         accepted.protocol = LocalProxyProtocol::HttpForward;
         return parse_http_proxy_request(sock, accepted, error);
     }
-
     error = "不支持的本地代理协议";
     return false;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LocalStream: one per proxied TCP connection
+// ─────────────────────────────────────────────────────────────────────────────
+struct LocalStream {
+    int32_t h2_stream_id = -1;
+    socket_t sock        = kInvalidSocket;
+
+    enum class State { Pending, Open, Closed } state = State::Pending;
+
+    LocalProxyProtocol protocol      = LocalProxyProtocol::Socks5;
+    std::vector<std::uint8_t> initial_payload;  // forwarded after 200 (HTTP forward mode)
+
+    // Per-stream mutex protects all fields below
+    std::mutex mutex;
+
+    // Downlink: server → local socket
+    std::vector<std::uint8_t> pending_downlink;
+    std::size_t pending_downlink_offset = 0;
+
+    // Uplink: local socket → server
+    std::vector<std::uint8_t> pending_uplink;
+    bool uplink_eof      = false;  // local side closed
+    bool uplink_deferred = false;  // H2 data provider is waiting for data
+
+    // HTTP response status (populated during H2 response header parsing)
+    int h2_status = 0;
+};
+
+// Pending tunnel: accepted by pump thread, submitted as H2 CONNECT by io thread
+struct PendingTunnel {
+    socket_t sock;
+    Socks5Request target;
+    LocalProxyProtocol protocol;
+    std::vector<std::uint8_t> initial_payload;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ClientRuntime
+// ─────────────────────────────────────────────────────────────────────────────
 class ClientRuntime {
 public:
-    ClientRuntime(ClientConfig cfg, socket_t listener) : cfg_(std::move(cfg)), listener_(listener) {}
+    ClientRuntime(ClientConfig cfg, socket_t listener)
+        : cfg_(std::move(cfg)), listener_(listener) {}
     ~ClientRuntime();
 
     bool start();
     bool should_retry() const { return should_retry_; }
     const std::string& last_error() const { return io_error_; }
-    static socket_t make_listener(std::uint16_t port,std::string host);
+    static socket_t make_listener(std::uint16_t port, std::string host);
 
 private:
-    struct LocalStream {
-        std::uint32_t id = 0;
-        socket_t sock = kInvalidSocket;
-        enum class State { Pending, Open, Failed, Closed } state = State::Pending;
-        LocalProxyProtocol protocol = LocalProxyProtocol::Socks5;
-        std::string error;
-        std::vector<std::uint8_t> initial_payload;
-        std::vector<std::uint8_t> pending_downlink;
-        std::size_t pending_downlink_offset = 0;
-        std::mutex mutex;
-        std::condition_variable cv;
-    };
-
-    struct RequestState {
-        enum class WaitMode {
-            UntilHeaders,
-            UntilStreamClose
-        };
-
-        enum class BodyMode {
-            Static,
-            Streaming
-        };
-
-        std::string method;
-        std::string path;
-        std::string content_type;
-        std::vector<std::uint8_t> body;
-        std::size_t body_offset = 0;
-        BodyMode body_mode = BodyMode::Static;
-        int status = 0;
-        bool success = false;
-        bool done = false;
-        bool long_lived = false;
-        WaitMode wait_mode = WaitMode::UntilStreamClose;
-        int32_t stream_id = -1;
-        std::string error;
-        std::mutex mutex;
-        std::condition_variable cv;
-    };
-
     bool wait_for_io_ready();
-    bool submit_request_sync(const std::string& method, const std::string& path,
-                             const std::vector<std::uint8_t>& body, const std::string& content_type,
-                             RequestState::WaitMode wait_mode, bool long_lived, int* status_out = nullptr);
-    bool start_event_stream();
-    bool start_upload_stream();
     void io_loop();
+    void process_pending_tunnels();
+    void process_pending_resumes();
+    bool flush_session();
+
+    // Called from io_thread when server responds 200 to our CONNECT
+    void handle_stream_open(int32_t h2_stream_id, const std::shared_ptr<LocalStream>& stream);
+    // Called from io_thread when server responds non-200 or stream fails
+    void handle_stream_fail(const std::shared_ptr<LocalStream>& stream, int status);
+
     void accept_and_pump_loop();
     void accept_one();
     void pump_local_socket(const std::shared_ptr<LocalStream>& stream);
     bool flush_local_socket(const std::shared_ptr<LocalStream>& stream, std::string& error);
-    void queue_frame(FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload);
-    void dispatch_downlink(const std::vector<std::uint8_t>& body);
-    void close_stream(std::uint32_t id, bool notify_remote);
+    // Close local socket and signal uplink EOF so H2 sends END_STREAM
+    void close_local_stream(const std::shared_ptr<LocalStream>& stream);
     void close_all_streams();
-    void process_request_queue();
-    bool flush_session();
-    bool is_stream_active(std::uint32_t id);
 
-    static nghttp2_ssize read_request_body(nghttp2_session* session, int32_t stream_id, uint8_t* buf,
-                                           size_t length, uint32_t* data_flags, nghttp2_data_source* source,
-                                           void* user_data);
-    static int on_begin_headers(nghttp2_session* session, const nghttp2_frame* frame, void* user_data);
-    static int on_header(nghttp2_session* session, const nghttp2_frame* frame, const uint8_t* name,
-                         size_t namelen, const uint8_t* value, size_t valuelen, uint8_t flags,
-                         void* user_data);
-    static int on_data_chunk_recv(nghttp2_session* session, uint8_t flags, int32_t stream_id,
-                                  const uint8_t* data, size_t len, void* user_data);
-    static int on_frame_recv(nghttp2_session* session, const nghttp2_frame* frame, void* user_data);
-    static int on_stream_close(nghttp2_session* session, int32_t stream_id, uint32_t error_code,
-                               void* user_data);
-    static nghttp2_ssize select_padding(nghttp2_session* session, const nghttp2_frame* frame,
-                                        size_t max_payloadlen, void* user_data);
+    // nghttp2 callbacks
+    static nghttp2_ssize uplink_read_callback(nghttp2_session* session, int32_t stream_id,
+                                               uint8_t* buf, size_t length,
+                                               uint32_t* data_flags, nghttp2_data_source* source,
+                                               void* user_data);
+    static int on_begin_headers(nghttp2_session*, const nghttp2_frame*, void*);
+    static int on_header(nghttp2_session*, const nghttp2_frame*, const uint8_t* name,
+                         size_t namelen, const uint8_t* value, size_t valuelen,
+                         uint8_t flags, void* user_data);
+    static int on_data_chunk_recv(nghttp2_session*, uint8_t flags, int32_t stream_id,
+                                   const uint8_t* data, size_t len, void* user_data);
+    static int on_frame_recv(nghttp2_session*, const nghttp2_frame*, void* user_data);
+    static int on_stream_close(nghttp2_session*, int32_t stream_id, uint32_t error_code,
+                                void* user_data);
+    static nghttp2_ssize select_padding(nghttp2_session*, const nghttp2_frame*,
+                                        size_t max_payloadlen, void*);
 
     ClientConfig cfg_;
-    socket_t listener_ = kInvalidSocket;
-    TlsSocket tls_;
+    socket_t     listener_ = kInvalidSocket;
+    TlsSocket    tls_;
     nghttp2_session* h2_ = nullptr;
-    std::thread io_thread_;
-    std::thread upload_thread_;
+    std::thread  io_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> io_ready_{false};
     std::atomic<bool> io_ok_{false};
-    std::string io_error_;
-    std::string peer_fingerprint_;
-    bool should_retry_ = false;
+    std::string  io_error_;
+    std::string  peer_fingerprint_;
+    bool         should_retry_ = false;
 
-    std::mutex requests_mutex_;
-    std::deque<std::shared_ptr<RequestState>> pending_requests_;
-    std::map<int32_t, std::shared_ptr<RequestState>> active_requests_;
-
-    std::mutex upload_mutex_;
-    std::condition_variable upload_cv_;
-    std::vector<std::uint8_t> upload_control_buffer_;
-    std::size_t upload_control_buffer_offset_ = 0;
-    std::vector<std::uint8_t> upload_data_buffer_;
-    std::size_t upload_data_buffer_offset_ = 0;
-    std::atomic<bool> upload_resume_needed_{false};
-    std::shared_ptr<RequestState> upload_request_;
-
+    // streams_ is OWNED by io_thread (only io_thread adds/removes entries).
+    // Pump thread takes read-only snapshots under streams_mutex_.
     std::mutex streams_mutex_;
-    std::map<std::uint32_t, std::shared_ptr<LocalStream>> streams_;
-    std::uint32_t next_stream_id_ = 1;
-    std::vector<std::uint8_t> downlink_buffer_;
+    std::map<int32_t, std::shared_ptr<LocalStream>> streams_;
 
-    int32_t event_stream_id_ = -1;
-    int32_t upload_stream_id_ = -1;
+    // New tunnel requests created by pump thread, consumed by io_thread
+    std::mutex pending_mutex_;
+    std::deque<PendingTunnel> pending_tunnels_;
+
+    // H2 stream IDs whose data providers need to be resumed (written by pump, read by io)
+    std::mutex resume_mutex_;
+    std::set<int32_t> pending_resume_;
+
     EventNotifier io_notifier_;
     EventNotifier local_loop_notifier_;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 ClientRuntime::~ClientRuntime() {
-    const bool was_running = running_.exchange(false);
-    upload_cv_.notify_all();
-    upload_resume_needed_ = true;
-    signal_notifier(io_notifier_, "client", "IO");
-    signal_notifier(local_loop_notifier_, "client", "local-loop");
-    if (was_running) {
-        int ignored_status = 0;
-        submit_request_sync("POST", "/api/tunnel/close", {}, "text/plain",
-                            RequestState::WaitMode::UntilStreamClose, false, &ignored_status);
-    }
+    running_ = false;
+    signal_notifier(io_notifier_, "client", "destructor");
+    signal_notifier(local_loop_notifier_, "client", "destructor");
     tls_.shutdown();
-    if (io_thread_.joinable()) {
-        io_thread_.join();
-    }
+    if (io_thread_.joinable()) io_thread_.join();
     io_notifier_.close();
     local_loop_notifier_.close();
     close_all_streams();
-    if (h2_ != nullptr) {
-        nghttp2_session_del(h2_);
-        h2_ = nullptr;
-    }
+    if (h2_) { nghttp2_session_del(h2_); h2_ = nullptr; }
 }
 
 bool ClientRuntime::wait_for_io_ready() {
     for (int i = 0; i < 200; ++i) {
-        if (io_ready_) {
-            return io_ok_;
-        }
+        if (io_ready_) return io_ok_.load();
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
     io_error_ = "等待 HTTP/2 连接初始化超时";
     return false;
 }
 
-bool ClientRuntime::submit_request_sync(const std::string& method, const std::string& path,
-                                        const std::vector<std::uint8_t>& body, const std::string& content_type,
-                                        RequestState::WaitMode wait_mode, bool long_lived, int* status_out) {
-    if (!running_) {
-        io_error_ = "客户端未运行";
-        return false;
-    }
-
-    auto request = std::make_shared<RequestState>();
-    request->method = method;
-    request->path = path;
-    request->body = body;
-    request->content_type = content_type;
-    request->wait_mode = wait_mode;
-    request->long_lived = long_lived;
-
-    {
-        std::lock_guard<std::mutex> lock(requests_mutex_);
-        pending_requests_.push_back(request);
-    }
-    signal_notifier(io_notifier_, "client", "request");
-
-    std::unique_lock<std::mutex> lock(request->mutex);
-    const bool completed = request->cv.wait_for(lock, std::chrono::seconds(15), [&] {
-        return request->done || !running_;
-    });
-
-    if (!completed) {
-        request->done = true;
-        request->success = false;
-        request->error = "等待服务端响应超时: " + method + " " + path;
-    }
-
-    if (status_out != nullptr) {
-        *status_out = request->status;
-    }
-    if (!request->success && !request->error.empty()) {
-        io_error_ = request->error;
-    }
-    return request->success;
-}
-
-bool ClientRuntime::start_event_stream() {
-    int status = 0;
-    if (!submit_request_sync("GET", "/api/tunnel/events", {}, "application/octet-stream",
-                             RequestState::WaitMode::UntilHeaders, true, &status)) {
-        return false;
-    }
-    if (status != 200) {
-        io_error_ = "建立事件流失败, HTTP " + std::to_string(status);
-        return false;
-    }
-    if (nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, event_stream_id_, kHttp2WindowSize) != 0) {
-        io_error_ = "设置 events stream 窗口失败";
-        return false;
-    }
-    return true;
-}
-
-bool ClientRuntime::start_upload_stream() {
-    auto request = std::make_shared<RequestState>();
-    request->method = "POST";
-    request->path = "/api/tunnel/upload";
-    request->content_type = "application/octet-stream";
-    request->wait_mode = RequestState::WaitMode::UntilHeaders;
-    request->long_lived = true;
-    request->body_mode = RequestState::BodyMode::Streaming;
-
-    {
-        std::lock_guard<std::mutex> lock(requests_mutex_);
-        pending_requests_.push_back(request);
-    }
-    signal_notifier(io_notifier_, "client", "upload-request");
-
-    std::unique_lock<std::mutex> lock(request->mutex);
-    const bool completed = request->cv.wait_for(lock, std::chrono::seconds(15), [&] {
-        return request->done || !running_;
-    });
-    if (!completed) {
-        request->done = true;
-        request->success = false;
-        request->error = "等待服务端 upload stream 响应超时";
-    }
-    if (!request->success && !request->error.empty()) {
-        io_error_ = request->error;
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> upload_lock(upload_mutex_);
-        upload_request_ = request;
-    }
-    upload_stream_id_ = request->stream_id;
-    if (nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, upload_stream_id_, kHttp2WindowSize) != 0) {
-        io_error_ = "设置 upload stream 窗口失败";
-        return false;
-    }
-    upload_resume_needed_ = true;
-    return true;
-}
-
 bool ClientRuntime::start() {
     should_retry_ = false;
     running_ = true;
-    if (listener_ == kInvalidSocket) {
-        io_error_ = "本地监听未初始化";
-        return false;
-    }
+    if (listener_ == kInvalidSocket) { io_error_ = "本地监听未初始化"; return false; }
+
     std::string notifier_error;
     if (!io_notifier_.open(notifier_error) || !local_loop_notifier_.open(notifier_error)) {
         io_error_ = notifier_error.empty() ? "初始化事件唤醒器失败" : notifier_error;
         running_ = false;
         return false;
     }
+
     PROXY_LOG(Info, "[client] 正在连接 " << cfg_.server_host << ":" << cfg_.server_port << " ...");
     io_thread_ = std::thread(&ClientRuntime::io_loop, this);
+
     if (!wait_for_io_ready()) {
         PROXY_LOG(Error, "[client] HTTP/2 初始化失败: " << io_error_);
         running_ = false;
         signal_notifier(local_loop_notifier_, "client", "local-loop");
         tls_.shutdown();
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
+        if (io_thread_.joinable()) io_thread_.join();
         io_notifier_.close();
         local_loop_notifier_.close();
         return false;
     }
 
-    int open_status = 0;
-    PROXY_LOG(Info, "[client] 正在打开隧道 stream ...");
-    if (!submit_request_sync("POST", "/api/tunnel/open", {}, "text/plain",
-                             RequestState::WaitMode::UntilStreamClose, false, &open_status) ||
-        open_status != 200) {
-        PROXY_LOG(Error, "[client] 打开隧道失败: "
-                            << (io_error_.empty() ? ("HTTP " + std::to_string(open_status)) : io_error_));
-        running_ = false;
-        signal_notifier(local_loop_notifier_, "client", "local-loop");
-        tls_.shutdown();
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
-        io_notifier_.close();
-        local_loop_notifier_.close();
-        return false;
-    }
-
-    PROXY_LOG(Info, "[client] 正在建立下行事件 stream ...");
-    if (!start_event_stream()) {
-        PROXY_LOG(Error, "[client] 启动事件流失败: " << io_error_);
-        running_ = false;
-        signal_notifier(local_loop_notifier_, "client", "local-loop");
-        tls_.shutdown();
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
-        io_notifier_.close();
-        local_loop_notifier_.close();
-        return false;
-    }
-
-    PROXY_LOG(Info, "[client] 正在建立上行 upload stream ...");
-    if (!start_upload_stream()) {
-        PROXY_LOG(Error, "[client] 启动 upload stream 失败: " << io_error_);
-        running_ = false;
-        signal_notifier(local_loop_notifier_, "client", "local-loop");
-        tls_.shutdown();
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
-        io_notifier_.close();
-        local_loop_notifier_.close();
-        return false;
-    }
-    PROXY_LOG(Info, "[client] HTTP/2 TLS 连接已建立到 " << cfg_.server_host << ":" << cfg_.server_port);
+    PROXY_LOG(Info, "[client] HTTP/2 TLS 连接已建立到 "
+              << cfg_.server_host << ":" << cfg_.server_port);
     if (!peer_fingerprint_.empty()) {
         PROXY_LOG(Debug, "[client] 服务器证书 SHA-256 指纹: " << peer_fingerprint_);
     }
-    PROXY_LOG(Info, "[client] 本地代理监听 " << cfg_.listen_host << ":" << cfg_.listen_port << " (SOCKS5 + HTTP)");
+    PROXY_LOG(Info, "[client] 本地代理监听 "
+              << cfg_.listen_host << ":" << cfg_.listen_port << " (SOCKS5 + HTTP)");
+
     should_retry_ = true;
     accept_and_pump_loop();
+
     if (!io_error_.empty()) {
         PROXY_LOG(Error, "[client] 客户端停止: " << io_error_);
         return false;
@@ -780,210 +508,264 @@ bool ClientRuntime::start() {
     return running_;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IO thread
+// ─────────────────────────────────────────────────────────────────────────────
+
 void ClientRuntime::io_loop() {
     try {
-    nghttp2_session_callbacks* callbacks = nullptr;
+
     const auto finish_with_error = [&](const std::string& error) {
         PROXY_LOG(Error, "[client] IO 线程退出: " << error);
-        io_error_ = error;
-        io_ok_ = false;
-        io_ready_ = true;
-        running_ = false;
+        io_error_  = error;
+        io_ok_     = false;
+        io_ready_  = true;
+        running_   = false;
+        signal_notifier(local_loop_notifier_, "client", "io-error");
     };
 
     tls_.set_enable_ech_grease(cfg_.enable_ech_grease);
     tls_.set_ech_config_base64(cfg_.ech_config);
     if (!tls_.connect_client(cfg_.server_host, cfg_.server_port, cfg_.server_host)) {
-        finish_with_error(tls_.last_error());
-        return;
+        finish_with_error(tls_.last_error()); return;
     }
     peer_fingerprint_ = tls_.peer_fingerprint();
+
     PROXY_LOG(Debug, "[client] TLS version: " << tls_.negotiated_tls_version());
-    PROXY_LOG(Debug, "[client] TLS cipher: " << tls_.negotiated_cipher());
-    PROXY_LOG(Debug, "[client] TLS ALPN: " << (tls_.negotiated_alpn().empty() ? "<none>" : tls_.negotiated_alpn()));
+    PROXY_LOG(Debug, "[client] TLS cipher: "  << tls_.negotiated_cipher());
+    PROXY_LOG(Debug, "[client] TLS ALPN: "
+              << (tls_.negotiated_alpn().empty() ? "<none>" : tls_.negotiated_alpn()));
     PROXY_LOG(Debug, "[client] TLS ECH accepted: " << (tls_.ech_accepted() ? "yes" : "no"));
     if (!tls_.ech_name_override().empty()) {
         PROXY_LOG(Debug, "[client] TLS ECH name override: " << tls_.ech_name_override());
     }
 
-    nghttp2_session_callbacks_new(&callbacks);
-    nghttp2_session_callbacks_set_on_begin_headers_callback(callbacks, &ClientRuntime::on_begin_headers);
-    nghttp2_session_callbacks_set_on_header_callback(callbacks, &ClientRuntime::on_header);
-    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, &ClientRuntime::on_data_chunk_recv);
-    nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, &ClientRuntime::on_frame_recv);
-    nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, &ClientRuntime::on_stream_close);
-    nghttp2_session_callbacks_set_select_padding_callback2(callbacks, &ClientRuntime::select_padding);
+    // ── Build nghttp2 client session ────────────────────────────────────────
+    nghttp2_session_callbacks* cbs = nullptr;
+    nghttp2_session_callbacks_new(&cbs);
+    nghttp2_session_callbacks_set_on_begin_headers_callback(cbs, &ClientRuntime::on_begin_headers);
+    nghttp2_session_callbacks_set_on_header_callback(cbs, &ClientRuntime::on_header);
+    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cbs, &ClientRuntime::on_data_chunk_recv);
+    nghttp2_session_callbacks_set_on_frame_recv_callback(cbs, &ClientRuntime::on_frame_recv);
+    nghttp2_session_callbacks_set_on_stream_close_callback(cbs, &ClientRuntime::on_stream_close);
+    nghttp2_session_callbacks_set_select_padding_callback2(cbs, &ClientRuntime::select_padding);
 
-    if (nghttp2_session_client_new(&h2_, callbacks, this) != 0) {
-        nghttp2_session_callbacks_del(callbacks);
-        finish_with_error("nghttp2_session_client_new 失败");
-        return;
+    if (nghttp2_session_client_new(&h2_, cbs, this) != 0) {
+        nghttp2_session_callbacks_del(cbs);
+        finish_with_error("nghttp2_session_client_new 失败"); return;
     }
-    nghttp2_session_callbacks_del(callbacks);
+    nghttp2_session_callbacks_del(cbs);
 
+    PROXY_LOG(Info, "[client] submitting SETTINGS...");
     const nghttp2_settings_entry settings[] = {
         {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, static_cast<uint32_t>(kHttp2WindowSize)},
-        {NGHTTP2_SETTINGS_MAX_FRAME_SIZE, kHttp2MaxFrameSize},
+        {NGHTTP2_SETTINGS_MAX_FRAME_SIZE,       kHttp2MaxFrameSize},
     };
-    if (nghttp2_submit_settings(h2_, NGHTTP2_FLAG_NONE, settings, 2) != 0 ||
-        nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, 0, kHttp2WindowSize) != 0 ||
-        !flush_session()) {
-        finish_with_error("发送 HTTP/2 SETTINGS 失败");
-        return;
+    int settings_ret = nghttp2_submit_settings(h2_, NGHTTP2_FLAG_NONE, settings, 2);
+    PROXY_LOG(Info, "[client] nghttp2_submit_settings returned " << settings_ret);
+    if (settings_ret != 0) {
+        finish_with_error("nghttp2_submit_settings 失败"); return;
     }
+    
+    int window_ret = nghttp2_session_set_local_window_size(h2_, NGHTTP2_FLAG_NONE, 0, kHttp2WindowSize);
+    PROXY_LOG(Info, "[client] nghttp2_session_set_local_window_size returned " << window_ret);
+    if (window_ret != 0) {
+        finish_with_error("nghttp2_session_set_local_window_size 失败"); return;
+    }
+    
+    PROXY_LOG(Info, "[client] flushing initial session data...");
+    if (!flush_session()) {
+        finish_with_error("发送 HTTP/2 SETTINGS 失败"); return;
+    }
+    PROXY_LOG(Info, "[client] initial flush complete");
 
-    io_ok_ = true;
+    io_ok_    = true;
     io_ready_ = true;
 
+    // ── Event loop ──────────────────────────────────────────────────────────
     EventDispatcher dispatcher;
-    if (!dispatcher.valid()) {
-        finish_with_error("初始化 HTTP/2 事件分发器失败");
-        return;
-    }
-    std::string dispatcher_error;
-    if (!dispatcher.set(tls_.raw_socket(), true, false, dispatcher_error) ||
-        !dispatcher.set(io_notifier_.readable_socket(), true, false, dispatcher_error)) {
-        finish_with_error(dispatcher_error);
-        return;
+    if (!dispatcher.valid()) { finish_with_error("初始化 HTTP/2 事件分发器失败"); return; }
+
+    std::string de;
+    if (!dispatcher.set(tls_.raw_socket(), true, false, de) ||
+        !dispatcher.set(io_notifier_.readable_socket(), true, false, de)) {
+        finish_with_error(de); return;
     }
 
     while (running_) {
-        if (upload_stream_id_ >= 0 && upload_resume_needed_.exchange(false)) {
-            nghttp2_session_resume_data(h2_, upload_stream_id_);
-            if (!flush_session()) {
-                io_error_ = "恢复 upload stream 失败";
-                running_ = false;
-                break;
-            }
-        }
+        // Submit any new CONNECT streams requested by the pump thread
+        process_pending_tunnels();
 
-        process_request_queue();
+        // Resume data providers that have new uplink data
+        process_pending_resumes();
 
-        std::vector<SocketEvent> events;
-        const int ready = dispatcher.wait(events, -1, dispatcher_error);
-        if (ready < 0) {
-            io_error_ = dispatcher_error;
-            running_ = false;
+        if (!flush_session()) {
+            io_error_ = "发送 HTTP/2 帧失败";
+            running_  = false;
             break;
         }
-        for (const auto& event : events) {
-            if (event.sock == io_notifier_.readable_socket()) {
+
+        std::vector<SocketEvent> events;
+        const int ready = dispatcher.wait(events, -1, de);
+        if (ready < 0) {
+            io_error_ = de;
+            running_  = false;
+            break;
+        }
+
+        bool got_tls_data = false;
+        for (const auto& ev : events) {
+            if (ev.sock == io_notifier_.readable_socket()) {
                 io_notifier_.drain();
                 continue;
             }
-            if (event.sock != tls_.raw_socket()) {
-                continue;
+            if (ev.sock == tls_.raw_socket() && (ev.readable || ev.error || ev.hangup)) {
+                got_tls_data = true;
             }
-            if (!event.readable && !event.error && !event.hangup) {
-                continue;
-            }
+        }
+
+        if (got_tls_data) {
             std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
             const int ret = tls_.read(buf.data(), buf.size());
             if (ret <= 0) {
                 io_error_ = tls_.last_error().empty() ? "HTTP/2 连接已断开" : tls_.last_error();
-                running_ = false;
+                running_  = false;
                 break;
             }
-            const auto consumed = nghttp2_session_mem_recv2(h2_, buf.data(), static_cast<size_t>(ret));
+            const auto consumed = nghttp2_session_mem_recv2(h2_, buf.data(),
+                                                             static_cast<std::size_t>(ret));
             if (consumed < 0) {
-                io_error_ = std::string("nghttp2_session_mem_recv2 失败: ") + nghttp2_strerror(static_cast<int>(consumed));
-                running_ = false;
+                io_error_ = std::string("nghttp2_session_mem_recv2 失败: ")
+                            + nghttp2_strerror(static_cast<int>(consumed));
+                running_  = false;
                 break;
             }
             if (!flush_session()) {
                 io_error_ = "发送 HTTP/2 帧失败";
-                running_ = false;
+                running_  = false;
                 break;
             }
         }
+    }
+
+    // Tear down all streams
+    {
+        std::lock_guard<std::mutex> lock(streams_mutex_);
+        for (auto& kv : streams_) {
+            socket_t sock = kInvalidSocket;
+            {
+                std::lock_guard<std::mutex> sl(kv.second->mutex);
+                sock = kv.second->sock;
+                kv.second->sock  = kInvalidSocket;
+                kv.second->state = LocalStream::State::Closed;
+                kv.second->uplink_eof = true;
+            }
+            if (sock != kInvalidSocket) close_socket(sock);
+        }
+        streams_.clear();
     }
 
     if (!io_error_.empty()) {
         PROXY_LOG(Warn, "[client] HTTP/2 会话结束: " << io_error_);
     }
+    signal_notifier(local_loop_notifier_, "client", "io-done");
 
-    std::lock_guard<std::mutex> lock(requests_mutex_);
-    for (auto& item : active_requests_) {
-        std::lock_guard<std::mutex> req_lock(item.second->mutex);
-        item.second->done = true;
-        item.second->success = false;
-        if (item.second->error.empty()) {
-            item.second->error = io_error_.empty() ? "HTTP/2 会话已结束" : io_error_;
-        }
-        item.second->cv.notify_all();
-    }
-    while (!pending_requests_.empty()) {
-        auto req = pending_requests_.front();
-        pending_requests_.pop_front();
-        std::lock_guard<std::mutex> req_lock(req->mutex);
-        req->done = true;
-        req->success = false;
-        req->error = io_error_.empty() ? "HTTP/2 会话已结束" : io_error_;
-        req->cv.notify_all();
-    }
-    signal_notifier(local_loop_notifier_, "client", "local-loop");
     } catch (const std::exception& ex) {
         io_error_ = std::string("io_loop 未捕获异常: ") + ex.what();
         PROXY_LOG(Error, "[client] " << io_error_);
-        io_ok_ = false;
+        io_ok_    = false;
         io_ready_ = true;
-        running_ = false;
-        signal_notifier(local_loop_notifier_, "client", "local-loop");
+        running_  = false;
+        signal_notifier(local_loop_notifier_, "client", "io-exception");
     } catch (...) {
         io_error_ = "io_loop 未捕获未知异常";
         PROXY_LOG(Error, "[client] " << io_error_);
-        io_ok_ = false;
+        io_ok_    = false;
         io_ready_ = true;
-        running_ = false;
-        signal_notifier(local_loop_notifier_, "client", "local-loop");
+        running_  = false;
+        signal_notifier(local_loop_notifier_, "client", "io-exception");
     }
 }
 
-void ClientRuntime::process_request_queue() {
-    std::deque<std::shared_ptr<RequestState>> queue;
+void ClientRuntime::process_pending_tunnels() {
+    std::deque<PendingTunnel> tunnels;
     {
-        std::lock_guard<std::mutex> lock(requests_mutex_);
-        queue.swap(pending_requests_);
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        tunnels.swap(pending_tunnels_);
     }
 
-    for (auto& request : queue) {
-        const auto header_fields = make_request_header_fields(cfg_, request->method, request->path,
-                                                              request->content_type, !request->body.empty());
-        std::vector<nghttp2_nv> headers;
-        headers.reserve(header_fields.size());
-        for (const auto& field : header_fields) {
-            headers.push_back(make_nv(field.name, field.value));
-        }
-        nghttp2_data_provider2 provider{};
-        nghttp2_data_provider2* provider_ptr = nullptr;
-        if (request->body_mode == RequestState::BodyMode::Streaming || !request->body.empty()) {
-            provider.source.ptr = request.get();
-            provider.read_callback = &ClientRuntime::read_request_body;
-            provider_ptr = &provider;
+    for (auto& pt : tunnels) {
+        auto stream = std::make_shared<LocalStream>();
+        stream->sock            = pt.sock;
+        stream->protocol        = pt.protocol;
+        stream->initial_payload = std::move(pt.initial_payload);
+
+        // HTTP/2 CONNECT headers (no :scheme, no :path per RFC 7540 §8.3)
+        const std::string authority = pt.target.host + ":" + std::to_string(pt.target.port);
+        
+        // 先收集所有headers到vector，确保容量足够后再创建nghttp2_nv
+        // 因为vector重新分配会使之前保存的指针失效
+        std::vector<std::string> header_storage;
+        header_storage.reserve(6);  // 最多6个: method, CONNECT, authority, host:port, x-tunnel-auth, password
+        header_storage.push_back(":method");
+        header_storage.push_back("CONNECT");
+        header_storage.push_back(":authority");
+        header_storage.push_back(authority);
+        
+        std::vector<nghttp2_nv> hdrs;
+        hdrs.push_back(make_nv(header_storage[0], header_storage[1]));
+        hdrs.push_back(make_nv(header_storage[2], header_storage[3]));
+        
+        if (!cfg_.auth_password.empty()) {
+            header_storage.push_back("x-tunnel-auth");
+            header_storage.push_back(cfg_.auth_password);
+            hdrs.push_back(make_nv(header_storage[4], header_storage[5]));
         }
 
-        const int32_t stream_id = nghttp2_submit_request2(h2_, nullptr, headers.data(), headers.size(),
-                                                          provider_ptr, request.get());
-        if (stream_id < 0) {
-            std::lock_guard<std::mutex> lock(request->mutex);
-            request->done = true;
-            request->success = false;
-            request->error = std::string("nghttp2_submit_request2 失败: ") + nghttp2_strerror(stream_id);
-            request->cv.notify_all();
+        // Data provider for uplink (local socket → server)
+        nghttp2_data_provider2 provider{};
+        provider.read_callback = &ClientRuntime::uplink_read_callback;
+
+        PROXY_LOG(Info, "[client] submitting H2 request with " << hdrs.size() << " headers");
+        for (const auto& h : hdrs) {
+            std::string name(reinterpret_cast<const char*>(h.name), h.namelen);
+            std::string value(reinterpret_cast<const char*>(h.value), h.valuelen);
+            PROXY_LOG(Debug, "[client]   " << name << ": " << value);
+        }
+
+        const int32_t sid = nghttp2_submit_request2(
+            h2_, nullptr, hdrs.data(), hdrs.size(), &provider, this);
+        if (sid < 0) {
+            PROXY_LOG(Error, "[client] H2 CONNECT submit 失败: " << nghttp2_strerror(sid));
+            close_socket(pt.sock);
             continue;
         }
 
-        request->stream_id = stream_id;
+        stream->h2_stream_id = sid;
         {
-            std::lock_guard<std::mutex> lock(requests_mutex_);
-            active_requests_[stream_id] = request;
+            std::lock_guard<std::mutex> lock(streams_mutex_);
+            streams_[sid] = stream;
         }
-        if (!flush_session()) {
-            std::lock_guard<std::mutex> lock(request->mutex);
-            request->done = true;
-            request->success = false;
-            request->error = "发送 HTTP/2 请求失败";
-            request->cv.notify_all();
+        PROXY_LOG(Debug, "[client] H2 CONNECT stream=" << sid << " target=" << authority);
+    }
+}
+
+void ClientRuntime::process_pending_resumes() {
+    std::set<int32_t> to_resume;
+    {
+        std::lock_guard<std::mutex> lock(resume_mutex_);
+        to_resume.swap(pending_resume_);
+    }
+    for (int32_t sid : to_resume) {
+        // streams_ is safe to access without lock here: io_thread owns the map
+        auto it = streams_.find(sid);
+        if (it == streams_.end()) continue;
+        auto& stream = it->second;
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        if (stream->uplink_deferred &&
+            (!stream->pending_uplink.empty() || stream->uplink_eof)) {
+            stream->uplink_deferred = false;
+            nghttp2_session_resume_data(h2_, sid);
         }
     }
 }
@@ -993,358 +775,268 @@ bool ClientRuntime::flush_session() {
         const uint8_t* data = nullptr;
         const auto len = nghttp2_session_mem_send2(h2_, &data);
         if (len < 0) {
+            PROXY_LOG(Error, "[client] nghttp2_session_mem_send2 failed: " << len);
             return false;
         }
-        if (len == 0) {
-            return true;
-        }
+        if (len == 0) return true;
+
         if (!tls_.write_all(data, static_cast<std::size_t>(len))) {
+            PROXY_LOG(Error, "[client] TLS write_all failed");
             return false;
         }
     }
 }
 
-nghttp2_ssize ClientRuntime::read_request_body(nghttp2_session* /*session*/, int32_t /*stream_id*/, uint8_t* buf,
-                                               size_t length, uint32_t* data_flags, nghttp2_data_source* source,
-                                               void* user_data) {
+void ClientRuntime::handle_stream_open(int32_t h2_stream_id,
+                                        const std::shared_ptr<LocalStream>& stream) {
+    LocalProxyProtocol protocol;
+    socket_t sock;
+    std::vector<std::uint8_t> initial;
+
+    {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        stream->state = LocalStream::State::Open;
+        protocol = stream->protocol;
+        sock     = stream->sock;
+        initial  = std::move(stream->initial_payload);
+        // Initial payload (HTTP forward) becomes first uplink data
+        if (!initial.empty()) {
+            stream->pending_uplink.insert(stream->pending_uplink.end(),
+                                          initial.begin(), initial.end());
+        }
+    }
+
+    // Send protocol-level success reply synchronously (socket is still blocking here)
+    if (protocol == LocalProxyProtocol::Socks5) {
+        send_socks5_reply(sock, 0x00);
+        PROXY_LOG(Debug, "[client] stream=" << h2_stream_id << " SOCKS5 成功响应已发送");
+    } else if (protocol == LocalProxyProtocol::HttpConnect) {
+        send_http_proxy_response(sock, 200, "Connection Established");
+        PROXY_LOG(Debug, "[client] stream=" << h2_stream_id << " HTTP CONNECT 200 已发送");
+    }
+    // HttpForward: transparent, no reply
+
+    // Switch local socket to non-blocking for the pump loop
+    std::string err;
+    proxy::set_socket_nonblocking(sock, true, err);
+
+    signal_notifier(local_loop_notifier_, "client", "stream-open");
+
+    // Resume data provider if it deferred waiting for uplink data
+    {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        if (stream->uplink_deferred &&
+            (!stream->pending_uplink.empty() || stream->uplink_eof)) {
+            stream->uplink_deferred = false;
+            nghttp2_session_resume_data(h2_, h2_stream_id);
+        }
+    }
+}
+
+void ClientRuntime::handle_stream_fail(const std::shared_ptr<LocalStream>& stream, int status) {
+    LocalProxyProtocol protocol;
+    socket_t sock;
+    {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        protocol      = stream->protocol;
+        sock          = stream->sock;
+        stream->sock  = kInvalidSocket;
+        stream->state = LocalStream::State::Closed;
+        stream->uplink_eof = true;
+    }
+    PROXY_LOG(Warn, "[client] stream=" << stream->h2_stream_id
+              << " CONNECT 失败 HTTP " << status);
+    if (sock == kInvalidSocket) return;
+    if (protocol == LocalProxyProtocol::Socks5) {
+        send_socks5_reply(sock, 0x05);
+    } else if (protocol == LocalProxyProtocol::HttpConnect ||
+               protocol == LocalProxyProtocol::HttpForward) {
+        send_http_proxy_response(sock, 502, "Bad Gateway", "tunnel connect failed");
+    }
+    close_socket(sock);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// nghttp2 callbacks (always called from io_thread)
+// ─────────────────────────────────────────────────────────────────────────────
+
+nghttp2_ssize ClientRuntime::uplink_read_callback(nghttp2_session* /*session*/,
+                                                   int32_t stream_id,
+                                                   uint8_t* buf, size_t length,
+                                                   uint32_t* data_flags,
+                                                   nghttp2_data_source* /*source*/,
+                                                   void* user_data) {
     auto* self = static_cast<ClientRuntime*>(user_data);
-    auto* request = static_cast<RequestState*>(source->ptr);
-    if (request->body_mode == RequestState::BodyMode::Streaming) {
-        std::lock_guard<std::mutex> lock(self->upload_mutex_);
-        std::vector<std::uint8_t>* active_buffer = nullptr;
-        std::size_t* active_offset = nullptr;
-        if (self->upload_control_buffer_offset_ < self->upload_control_buffer_.size()) {
-            active_buffer = &self->upload_control_buffer_;
-            active_offset = &self->upload_control_buffer_offset_;
-        } else if (self->upload_data_buffer_offset_ < self->upload_data_buffer_.size()) {
-            active_buffer = &self->upload_data_buffer_;
-            active_offset = &self->upload_data_buffer_offset_;
-        }
 
-        const std::size_t available = (active_buffer == nullptr || active_offset == nullptr)
-            ? 0
-            : (active_buffer->size() - *active_offset);
-        if (available == 0) {
-            if (!self->running_) {
-                *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-                return 0;
-            }
-            return NGHTTP2_ERR_DEFERRED;
-        }
+    // io_thread owns streams_; no lock needed for map lookup
+    auto it = self->streams_.find(stream_id);
+    if (it == self->streams_.end()) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+        return 0;
+    }
+    auto& stream = it->second;
 
-        const std::size_t copy_len = available < length ? available : length;
-        std::memcpy(buf, active_buffer->data() + *active_offset, copy_len);
-        *active_offset += copy_len;
+    std::lock_guard<std::mutex> sl(stream->mutex);
 
-        if (*active_offset == active_buffer->size()) {
-            active_buffer->clear();
-            *active_offset = 0;
-        } else if (*active_offset >= kTunnelIoChunkSize) {
-            active_buffer->erase(active_buffer->begin(),
-                                 active_buffer->begin() + static_cast<std::ptrdiff_t>(*active_offset));
-            *active_offset = 0;
-        }
-        return static_cast<nghttp2_ssize>(copy_len);
+    // Wait until stream is Open (200 received) before sending data
+    if (stream->state == LocalStream::State::Pending) {
+        stream->uplink_deferred = true;
+        return NGHTTP2_ERR_DEFERRED;
     }
 
-    const std::size_t remaining = request->body.size() - request->body_offset;
-    const std::size_t copy_len = remaining < length ? remaining : length;
-    if (copy_len > 0) {
-        std::memcpy(buf, request->body.data() + request->body_offset, copy_len);
-        request->body_offset += copy_len;
+    if (stream->pending_uplink.empty()) {
+        if (stream->uplink_eof) {
+            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            return 0;
+        }
+        stream->uplink_deferred = true;
+        return NGHTTP2_ERR_DEFERRED;
     }
-    if (request->body_offset >= request->body.size()) {
+
+    const std::size_t n = std::min(length, stream->pending_uplink.size());
+    std::memcpy(buf, stream->pending_uplink.data(), n);
+    stream->pending_uplink.erase(stream->pending_uplink.begin(),
+                                  stream->pending_uplink.begin() + static_cast<std::ptrdiff_t>(n));
+
+    // If more data remains, schedule another call
+    if (!stream->pending_uplink.empty()) {
+        nghttp2_session_resume_data(self->h2_, stream_id);
+    } else if (stream->uplink_eof) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
     }
-    return static_cast<nghttp2_ssize>(copy_len);
+
+    return static_cast<nghttp2_ssize>(n);
 }
 
-int ClientRuntime::on_begin_headers(nghttp2_session* /*session*/, const nghttp2_frame* /*frame*/, void* /*user_data*/) {
+int ClientRuntime::on_begin_headers(nghttp2_session* /*session*/,
+                                     const nghttp2_frame* /*frame*/, void* /*user_data*/) {
     return 0;
 }
 
-int ClientRuntime::on_header(nghttp2_session* /*session*/, const nghttp2_frame* frame, const uint8_t* name,
-                             size_t namelen, const uint8_t* value, size_t valuelen, uint8_t /*flags*/,
-                             void* user_data) {
-    if (frame->hd.type != NGHTTP2_HEADERS || frame->headers.cat != NGHTTP2_HCAT_RESPONSE) {
-        return 0;
-    }
+int ClientRuntime::on_header(nghttp2_session* /*session*/, const nghttp2_frame* frame,
+                              const uint8_t* name, size_t namelen,
+                              const uint8_t* value, size_t valuelen,
+                              uint8_t /*flags*/, void* user_data) {
+    if (frame->hd.type != NGHTTP2_HEADERS ||
+        frame->headers.cat != NGHTTP2_HCAT_RESPONSE) return 0;
 
     auto* self = static_cast<ClientRuntime*>(user_data);
-    std::shared_ptr<RequestState> request;
-    {
-        std::lock_guard<std::mutex> lock(self->requests_mutex_);
-        const auto it = self->active_requests_.find(frame->hd.stream_id);
-        if (it == self->active_requests_.end()) {
-            return 0;
-        }
-        request = it->second;
-    }
+    auto it = self->streams_.find(frame->hd.stream_id);
+    if (it == self->streams_.end()) return 0;
 
-    const std::string header_name(reinterpret_cast<const char*>(name), namelen);
-    if (header_name == ":status") {
+    const std::string hname(reinterpret_cast<const char*>(name), namelen);
+    if (hname == ":status") {
         try {
-            request->status = std::stoi(std::string(reinterpret_cast<const char*>(value), valuelen));
-            PROXY_LOG(Debug, "[client] stream " << frame->hd.stream_id << " HTTP status " << request->status);
-        } catch (const std::exception& ex) {
-            PROXY_LOG(Error, "[client] 解析 HTTP 状态码失败 stream="
-                                 << frame->hd.stream_id << " error=" << ex.what());
-            request->status = 0;
-        }
+            std::lock_guard<std::mutex> sl(it->second->mutex);
+            it->second->h2_status = std::stoi(
+                std::string(reinterpret_cast<const char*>(value), valuelen));
+        } catch (...) {}
     }
     return 0;
 }
 
-int ClientRuntime::on_data_chunk_recv(nghttp2_session* /*session*/, uint8_t /*flags*/, int32_t stream_id,
-                                      const uint8_t* data, size_t len, void* user_data) {
+int ClientRuntime::on_data_chunk_recv(nghttp2_session* /*session*/, uint8_t /*flags*/,
+                                       int32_t stream_id, const uint8_t* data, size_t len,
+                                       void* user_data) {
     auto* self = static_cast<ClientRuntime*>(user_data);
-    if (stream_id == self->event_stream_id_) {
-        self->dispatch_downlink(std::vector<std::uint8_t>(data, data + len));
-    }
-    return 0;
-}
+    auto it = self->streams_.find(stream_id);
+    if (it == self->streams_.end()) return 0;
+    auto& stream = it->second;
 
-int ClientRuntime::on_frame_recv(nghttp2_session* /*session*/, const nghttp2_frame* frame, void* user_data) {
-    if (frame->hd.type != NGHTTP2_HEADERS && frame->hd.type != NGHTTP2_DATA) {
-        return 0;
-    }
-
-    auto* self = static_cast<ClientRuntime*>(user_data);
-    std::shared_ptr<RequestState> request;
+    bool buffered_too_much = false;
     {
-        std::lock_guard<std::mutex> lock(self->requests_mutex_);
-        const auto it = self->active_requests_.find(frame->hd.stream_id);
-        if (it == self->active_requests_.end()) {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
             return 0;
         }
-        request = it->second;
+        stream->pending_downlink.insert(stream->pending_downlink.end(), data, data + len);
+        const std::size_t buffered = stream->pending_downlink.size()
+                                   - stream->pending_downlink_offset;
+        buffered_too_much = (buffered > kMaxBufferedDownlinkBytes);
     }
+    PROXY_LOG(Debug, "[client] stream=" << stream_id << " 收到下行数据 bytes=" << len);
 
-        if (frame->hd.type == NGHTTP2_HEADERS && request->wait_mode == RequestState::WaitMode::UntilHeaders &&
-        frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
-        {
-            std::lock_guard<std::mutex> lock(request->mutex);
-            request->done = true;
-            request->success = request->status == 200;
-            if (!request->success) {
-                request->error = "HTTP " + std::to_string(request->status);
-            }
-        }
-        request->cv.notify_all();
-        if (request->long_lived) {
-            if (request->path == "/api/tunnel/events") {
-                self->event_stream_id_ = frame->hd.stream_id;
-            } else if (request->path == "/api/tunnel/upload") {
-                self->upload_stream_id_ = frame->hd.stream_id;
-            }
-        }
-        return 0;
-    }
-
-    if ((frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0) {
-        {
-            std::lock_guard<std::mutex> lock(request->mutex);
-            request->done = true;
-            request->success = request->status == 200;
-            if (!request->success) {
-                request->error = "HTTP " + std::to_string(request->status);
-            }
-        }
-        request->cv.notify_all();
+    if (buffered_too_much) {
+        PROXY_LOG(Warn, "[client] stream=" << stream_id << " 下行缓冲过大，关闭流");
+        self->close_local_stream(stream);
+    } else {
+        signal_notifier(self->local_loop_notifier_, "client", "downlink");
     }
     return 0;
 }
 
-int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_id, uint32_t /*error_code*/,
-                                   void* user_data) {
+int ClientRuntime::on_frame_recv(nghttp2_session* /*session*/, const nghttp2_frame* frame,
+                                  void* user_data) {
+    if (frame->hd.type != NGHTTP2_HEADERS) return 0;
+    if (frame->headers.cat != NGHTTP2_HCAT_RESPONSE) return 0;
+
     auto* self = static_cast<ClientRuntime*>(user_data);
-    std::shared_ptr<RequestState> request;
-    {
-        std::lock_guard<std::mutex> lock(self->requests_mutex_);
-        const auto it = self->active_requests_.find(stream_id);
-        if (it != self->active_requests_.end()) {
-            request = it->second;
-            if (!request->long_lived ||
-                (stream_id != self->event_stream_id_ && stream_id != self->upload_stream_id_)) {
-                self->active_requests_.erase(it);
-            }
-        }
-    }
+    auto it = self->streams_.find(frame->hd.stream_id);
+    if (it == self->streams_.end()) return 0;
+    auto& stream = it->second;
 
-    if (request) {
-        std::lock_guard<std::mutex> lock(request->mutex);
-        if (!request->done) {
-            request->done = true;
-            request->success = request->status == 200;
-            if (!request->success && request->error.empty()) {
-                request->error = "HTTP " + std::to_string(request->status);
-            }
-            request->cv.notify_all();
-        }
-    }
+    const int status = [&]() {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        return stream->h2_status;
+    }();
 
-    if (stream_id == self->event_stream_id_ && self->running_) {
-        self->io_error_ = "下行事件流已关闭";
-        self->running_ = false;
-    } else if (stream_id == self->upload_stream_id_ && self->running_) {
-        self->io_error_ = "上行 upload stream 已关闭";
-        self->running_ = false;
+    if (status == 200) {
+        self->handle_stream_open(frame->hd.stream_id, stream);
+    } else {
+        self->handle_stream_fail(stream, status);
     }
     return 0;
 }
 
-nghttp2_ssize ClientRuntime::select_padding(nghttp2_session* /*session*/, const nghttp2_frame* frame,
-                                            size_t max_payloadlen, void* /*user_data*/) {
+int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_id,
+                                    uint32_t /*error_code*/, void* user_data) {
+    auto* self = static_cast<ClientRuntime*>(user_data);
+
+    std::shared_ptr<LocalStream> stream;
+    {
+        std::lock_guard<std::mutex> lock(self->streams_mutex_);
+        auto it = self->streams_.find(stream_id);
+        if (it == self->streams_.end()) return 0;
+        stream = it->second;
+        self->streams_.erase(it);
+    }
+
+    socket_t sock = kInvalidSocket;
+    {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        sock         = stream->sock;
+        stream->sock = kInvalidSocket;
+        stream->state = LocalStream::State::Closed;
+        stream->uplink_eof = true;
+    }
+    if (sock != kInvalidSocket) close_socket(sock);
+
+    signal_notifier(self->local_loop_notifier_, "client", "stream-closed");
+    PROXY_LOG(Debug, "[client] H2 stream=" << stream_id << " 已关闭");
+    return 0;
+}
+
+nghttp2_ssize ClientRuntime::select_padding(nghttp2_session* /*session*/,
+                                             const nghttp2_frame* frame,
+                                             size_t max_payloadlen, void* /*user_data*/) {
     return static_cast<nghttp2_ssize>(
         select_http2_padded_length(frame->hd.type, frame->hd.length, max_payloadlen));
 }
 
-void ClientRuntime::queue_frame(FrameType type, std::uint32_t stream_id, const std::vector<std::uint8_t>& payload) {
-    {
-        std::lock_guard<std::mutex> lock(upload_mutex_);
-        auto& target = (type == FrameType::Data) ? upload_data_buffer_ : upload_control_buffer_;
-        proxy::append_frame(target, type, stream_id, payload);
-    }
-    upload_resume_needed_ = true;
-    signal_notifier(io_notifier_, "client", "upload");
-}
-
-void ClientRuntime::dispatch_downlink(const std::vector<std::uint8_t>& body) {
-    downlink_buffer_.insert(downlink_buffer_.end(), body.begin(), body.end());
-    std::vector<std::pair<FrameHeader, std::vector<std::uint8_t>>> frames;
-    if (!consume_frames(downlink_buffer_, frames)) {
-        PROXY_LOG(Error, "[client] 事件流负载损坏");
-        running_ = false;
-        return;
-    }
-
-    for (const auto& item : frames) {
-        const FrameType type = static_cast<FrameType>(item.first.type);
-        const std::uint32_t stream_id = proxy::to_be32(item.first.stream_id);
-        if (type == FrameType::Pong) {
-            continue;
-        }
-
-        std::shared_ptr<LocalStream> stream;
-        {
-            std::lock_guard<std::mutex> lock(streams_mutex_);
-            const auto it = streams_.find(stream_id);
-            if (it != streams_.end()) {
-                stream = it->second;
-            }
-        }
-
-        if (type == FrameType::OpenOk) {
-            if (!stream) {
-                PROXY_LOG(Debug, "[client] 收到 OpenOk，但本地流不存在 stream=" << stream_id);
-                continue;
-            }
-            PROXY_LOG(Info, "[client] 收到 OpenOk stream=" << stream_id);
-            LocalProxyProtocol protocol = LocalProxyProtocol::Socks5;
-            std::vector<std::uint8_t> initial_payload;
-            socket_t sock = kInvalidSocket;
-            {
-                std::lock_guard<std::mutex> lock(stream->mutex);
-                stream->state = LocalStream::State::Open;
-                protocol = stream->protocol;
-                initial_payload = stream->initial_payload;
-                stream->initial_payload.clear();
-                sock = stream->sock;
-            }
-            stream->cv.notify_all();
-            if (!initial_payload.empty()) {
-                PROXY_LOG(Debug, "[client] 发送初始请求负载 stream=" << stream_id
-                                                                    << " bytes=" << initial_payload.size());
-                queue_frame(FrameType::Data, stream_id, initial_payload);
-            }
-            if (protocol == LocalProxyProtocol::Socks5) {
-                if (!send_socks5_reply(sock, 0x00)) {
-                    close_stream(stream_id, true);
-                    continue;
-                }
-                PROXY_LOG(Debug, "[client] 已发送 SOCKS5 成功响应 stream=" << stream_id);
-            } else if (protocol == LocalProxyProtocol::HttpConnect) {
-                if (!send_http_proxy_response(sock, 200, "Connection Established")) {
-                    close_stream(stream_id, true);
-                    continue;
-                }
-                PROXY_LOG(Debug, "[client] 已发送 HTTP CONNECT 200 stream=" << stream_id);
-            }
-            std::string nonblocking_error;
-            if (!proxy::set_socket_nonblocking(sock, true, nonblocking_error)) {
-                PROXY_LOG(Warn, "[client] 设置本地流为非阻塞失败 stream=" << stream_id
-                                                                           << " error=" << nonblocking_error);
-            }
-            signal_notifier(local_loop_notifier_, "client", "open-ok");
-        } else if (type == FrameType::OpenFail) {
-            if (!stream) {
-                continue;
-            }
-            std::string reason;
-            decode_open_fail(item.second, reason);
-            PROXY_LOG(Warn, "[client] 收到 OpenFail stream=" << stream_id << " reason=" << reason);
-            LocalProxyProtocol protocol = LocalProxyProtocol::Socks5;
-            socket_t sock = kInvalidSocket;
-            {
-                std::lock_guard<std::mutex> lock(stream->mutex);
-                stream->state = LocalStream::State::Failed;
-                stream->error = reason;
-                protocol = stream->protocol;
-                sock = stream->sock;
-            }
-            stream->cv.notify_all();
-            if (protocol == LocalProxyProtocol::Socks5) {
-                send_socks5_reply(sock, 0x05);
-            } else if (protocol == LocalProxyProtocol::HttpConnect ||
-                       protocol == LocalProxyProtocol::HttpForward) {
-                send_http_proxy_response(sock, 502, "Bad Gateway",
-                                         reason.empty() ? "open remote stream failed" : reason);
-            }
-            close_stream(stream_id, false);
-            signal_notifier(local_loop_notifier_, "client", "open-fail");
-        } else if (type == FrameType::Data) {
-            if (!stream) {
-                PROXY_LOG(Debug, "[client] 丢弃未知流下行数据 stream=" << stream_id
-                                                                      << " bytes=" << item.second.size());
-                continue;
-            }
-            bool buffered_too_much = false;
-            std::size_t buffered_bytes = 0;
-            {
-                std::lock_guard<std::mutex> lock(stream->mutex);
-                if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
-                    continue;
-                }
-                stream->pending_downlink.insert(stream->pending_downlink.end(), item.second.begin(), item.second.end());
-                buffered_bytes = stream->pending_downlink.size() - stream->pending_downlink_offset;
-                buffered_too_much = buffered_bytes > kMaxBufferedDownlinkBytes;
-            }
-            PROXY_LOG(Debug, "[client] 收到下行数据 stream=" << stream_id
-                                                            << " bytes=" << item.second.size()
-                                                            << " buffered=" << buffered_bytes);
-            if (buffered_too_much) {
-                PROXY_LOG(Debug, "[client] 本地下行缓冲过大，关闭流 stream=" << stream_id
-                                                                    << " buffered=" << buffered_bytes);
-                close_stream(stream_id, true);
-            } else {
-                signal_notifier(local_loop_notifier_, "client", "downlink");
-            }
-        } else if (type == FrameType::Close) {
-            PROXY_LOG(Debug, "[client] 收到远端 Close stream=" << stream_id);
-            close_stream(stream_id, false);
-        }
-    }
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Local pump
+// ─────────────────────────────────────────────────────────────────────────────
 
 void ClientRuntime::accept_and_pump_loop() {
     try {
     EventDispatcher dispatcher;
     if (!dispatcher.valid()) {
         io_error_ = "初始化本地事件分发器失败";
-        running_ = false;
+        running_  = false;
         return;
     }
     std::map<socket_t, std::pair<bool, bool>> watched;
+
     while (running_) {
         std::map<socket_t, std::pair<bool, bool>> desired;
         desired[listener_] = {true, false};
@@ -1353,93 +1045,92 @@ void ClientRuntime::accept_and_pump_loop() {
         std::vector<std::shared_ptr<LocalStream>> snapshot;
         {
             std::lock_guard<std::mutex> lock(streams_mutex_);
-            for (const auto& kv : streams_) {
-                snapshot.push_back(kv.second);
-            }
+            for (const auto& kv : streams_) snapshot.push_back(kv.second);
         }
+
         for (const auto& stream : snapshot) {
-            socket_t sock = kInvalidSocket;
-            bool wants_write = false;
+            socket_t sock     = kInvalidSocket;
+            bool wants_write  = false;
             {
-                std::lock_guard<std::mutex> lock(stream->mutex);
-                if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
-                    continue;
-                }
-                sock = stream->sock;
-                wants_write = stream->pending_downlink_offset < stream->pending_downlink.size();
+                std::lock_guard<std::mutex> sl(stream->mutex);
+                if (stream->state != LocalStream::State::Open ||
+                    stream->sock == kInvalidSocket) continue;
+                sock        = stream->sock;
+                wants_write = stream->pending_downlink_offset
+                              < stream->pending_downlink.size();
             }
             desired[sock] = {true, wants_write};
         }
 
-        std::string dispatcher_error;
+        std::string de;
         for (auto it = watched.begin(); it != watched.end();) {
             if (desired.find(it->first) == desired.end()) {
-                dispatcher.remove(it->first, dispatcher_error);
+                dispatcher.remove(it->first, de);
                 it = watched.erase(it);
-                continue;
-            }
-            ++it;
+            } else { ++it; }
         }
         for (const auto& kv : desired) {
             const auto it = watched.find(kv.first);
             if (it == watched.end() || it->second != kv.second) {
-                if (!dispatcher.set(kv.first, kv.second.first, kv.second.second, dispatcher_error)) {
-                    io_error_ = dispatcher_error;
-                    running_ = false;
-                    return;
+                if (!dispatcher.set(kv.first, kv.second.first, kv.second.second, de)) {
+                    io_error_ = de; running_ = false; return;
                 }
                 watched[kv.first] = kv.second;
             }
         }
 
         std::vector<SocketEvent> events;
-        const int ready = dispatcher.wait(events, -1, dispatcher_error);
-        if (ready < 0) {
-            io_error_ = dispatcher_error;
-            running_ = false;
-            return;
-        }
+        const int ready = dispatcher.wait(events, -1, de);
+        if (ready < 0) { io_error_ = de; running_ = false; return; }
 
-        for (const auto& event : events) {
-            if (event.sock == local_loop_notifier_.readable_socket()) {
+        for (const auto& ev : events) {
+            if (ev.sock == local_loop_notifier_.readable_socket()) {
                 local_loop_notifier_.drain();
                 continue;
             }
-            if (event.sock == listener_ && event.readable) {
+            if (ev.sock == listener_ && ev.readable) {
                 accept_one();
                 continue;
             }
 
             std::shared_ptr<LocalStream> target;
             for (const auto& stream : snapshot) {
-                std::lock_guard<std::mutex> lock(stream->mutex);
-                if (stream->state == LocalStream::State::Open && stream->sock == event.sock) {
+                std::lock_guard<std::mutex> sl(stream->mutex);
+                if (stream->state == LocalStream::State::Open &&
+                    stream->sock == ev.sock) {
                     target = stream;
                     break;
                 }
             }
-            if (!target || !is_stream_active(target->id)) {
+            if (!target) continue;
+
+            if ((ev.error || ev.hangup) && !ev.writable) {
+                close_local_stream(target);
                 continue;
             }
-            if ((event.error || event.hangup) && !event.writable) {
-                close_stream(target->id, true);
-                continue;
-            }
-            if (event.writable) {
-                std::string error;
-                if (!flush_local_socket(target, error)) {
-                    PROXY_LOG(Debug, "[client] 刷新本地下行失败 stream=" << target->id << " error=" << error);
-                    close_stream(target->id, true);
+            if (ev.writable) {
+                std::string err;
+                if (!flush_local_socket(target, err)) {
+                    PROXY_LOG(Debug, "[client] 刷新本地下行失败 stream="
+                              << target->h2_stream_id << " " << err);
+                    close_local_stream(target);
                     continue;
                 }
             }
-            if (event.readable && is_stream_active(target->id)) {
-                pump_local_socket(target);
+            if (ev.readable) {
+                // Re-check state under lock
+                bool still_open = false;
+                {
+                    std::lock_guard<std::mutex> sl(target->mutex);
+                    still_open = (target->state == LocalStream::State::Open &&
+                                  target->sock != kInvalidSocket);
+                }
+                if (still_open) pump_local_socket(target);
             }
         }
     }
     PROXY_LOG(Warn, "[client] 本地转发循环结束"
-                         << (io_error_.empty() ? "" : " reason=" + io_error_));
+              << (io_error_.empty() ? "" : " reason=" + io_error_));
     } catch (const std::exception& ex) {
         io_error_ = std::string("accept_and_pump_loop 未捕获异常: ") + ex.what();
         PROXY_LOG(Error, "[client] " << io_error_);
@@ -1451,17 +1142,98 @@ void ClientRuntime::accept_and_pump_loop() {
     }
 }
 
-bool ClientRuntime::flush_local_socket(const std::shared_ptr<LocalStream>& stream, std::string& error) {
-    std::lock_guard<std::mutex> lock(stream->mutex);
-    if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
-        return true;
+void ClientRuntime::accept_one() {
+    sockaddr_storage ss{};
+    socklen_t slen = sizeof(ss);
+    socket_t sock = ::accept(listener_, reinterpret_cast<sockaddr*>(&ss), &slen);
+    if (sock == kInvalidSocket) return;
+
+    AcceptedProxyRequest accepted;
+    std::string error;
+    if (!accept_local_proxy_request(sock, accepted, error)) {
+        if (!error.empty()) {
+            PROXY_LOG(Warn, "[client] 本地代理握手失败: " << error);
+        }
+        if (accepted.protocol == LocalProxyProtocol::HttpConnect ||
+            accepted.protocol == LocalProxyProtocol::HttpForward) {
+            send_http_proxy_response(sock, 400, "Bad Request",
+                                     error.empty() ? "bad proxy request" : error);
+        }
+        close_socket(sock);
+        return;
     }
+
+    PROXY_LOG(Info, "[client] 新建本地连接 target=" << describe_socks5_target(accepted.target)
+              << " atyp=" << socks5_atyp_name(accepted.target.atyp)
+              << " proto=" << (accepted.protocol == LocalProxyProtocol::Socks5 ? "socks5" :
+                               accepted.protocol == LocalProxyProtocol::HttpConnect ? "http-connect"
+                                                                                    : "http"));
+
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        pending_tunnels_.push_back(PendingTunnel{
+            sock,
+            accepted.target,
+            accepted.protocol,
+            std::move(accepted.initial_payload)
+        });
+    }
+    signal_notifier(io_notifier_, "client", "new-tunnel");
+}
+
+void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream) {
+    socket_t sock = kInvalidSocket;
+    {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) return;
+        sock = stream->sock;
+    }
+
+    std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
+#ifdef _WIN32
+    const int ret = ::recv(sock, reinterpret_cast<char*>(buf.data()),
+                           static_cast<int>(buf.size()), 0);
+#else
+    const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
+#endif
+    if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) return;
+    if (ret <= 0) {
+        close_local_stream(stream);
+        return;
+    }
+
+    PROXY_LOG(Debug, "[client] stream=" << stream->h2_stream_id
+              << " 读取本地上行数据 bytes=" << ret);
+
+    bool need_resume = false;
+    {
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        stream->pending_uplink.insert(stream->pending_uplink.end(),
+                                      buf.data(), buf.data() + ret);
+        need_resume = stream->uplink_deferred;
+    }
+
+    if (need_resume) {
+        {
+            std::lock_guard<std::mutex> lock(resume_mutex_);
+            pending_resume_.insert(stream->h2_stream_id);
+        }
+        signal_notifier(io_notifier_, "client", "uplink-data");
+    }
+}
+
+bool ClientRuntime::flush_local_socket(const std::shared_ptr<LocalStream>& stream,
+                                        std::string& error) {
+    std::lock_guard<std::mutex> sl(stream->mutex);
+    if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) return true;
 
     while (stream->pending_downlink_offset < stream->pending_downlink.size()) {
         const auto* data = stream->pending_downlink.data() + stream->pending_downlink_offset;
-        const std::size_t remaining = stream->pending_downlink.size() - stream->pending_downlink_offset;
+        const std::size_t remaining = stream->pending_downlink.size()
+                                    - stream->pending_downlink_offset;
 #ifdef _WIN32
-        const int ret = ::send(stream->sock, reinterpret_cast<const char*>(data), static_cast<int>(remaining), 0);
+        const int ret = ::send(stream->sock, reinterpret_cast<const char*>(data),
+                               static_cast<int>(remaining), 0);
 #else
         const int ret = static_cast<int>(::send(stream->sock, data, remaining, 0));
 #endif
@@ -1469,12 +1241,7 @@ bool ClientRuntime::flush_local_socket(const std::shared_ptr<LocalStream>& strea
             stream->pending_downlink_offset += static_cast<std::size_t>(ret);
             continue;
         }
-
-        const int code = proxy::last_socket_error_code();
-        if (ret < 0 && is_socket_would_block(code)) {
-            break;
-        }
-
+        if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) break;
         error = "socket send 失败: " + proxy::socket_error_string();
         return false;
     }
@@ -1485,203 +1252,101 @@ bool ClientRuntime::flush_local_socket(const std::shared_ptr<LocalStream>& strea
     } else if (stream->pending_downlink_offset >= kTunnelIoChunkSize) {
         stream->pending_downlink.erase(
             stream->pending_downlink.begin(),
-            stream->pending_downlink.begin() + static_cast<std::ptrdiff_t>(stream->pending_downlink_offset));
+            stream->pending_downlink.begin()
+                + static_cast<std::ptrdiff_t>(stream->pending_downlink_offset));
         stream->pending_downlink_offset = 0;
     }
-
     return true;
 }
 
-void ClientRuntime::accept_one() {
-    sockaddr_storage ss{};
-    socklen_t slen = sizeof(ss);
-    socket_t sock = ::accept(listener_, reinterpret_cast<sockaddr*>(&ss), &slen);
-    if (sock == kInvalidSocket) {
-        return;
-    }
-
-    AcceptedProxyRequest accepted;
-    std::string error;
-    if (!accept_local_proxy_request(sock, accepted, error)) {
-        if (!error.empty()) {
-            PROXY_LOG(Warn, "[client] 本地代理握手失败: " << error);
-        }
-        if (accepted.protocol == LocalProxyProtocol::HttpConnect ||
-            accepted.protocol == LocalProxyProtocol::HttpForward) {
-            send_http_proxy_response(sock, 400, "Bad Request", error.empty() ? "bad proxy request" : error);
-        }
-        close_socket(sock);
-        return;
-    }
-
-    auto stream = std::make_shared<LocalStream>();
-    stream->id = next_stream_id_++;
-    stream->sock = sock;
-    stream->protocol = accepted.protocol;
-    stream->initial_payload = std::move(accepted.initial_payload);
-    {
-        std::lock_guard<std::mutex> lock(streams_mutex_);
-        streams_[stream->id] = stream;
-    }
-
-    PROXY_LOG(Info, "[client] 新建本地连接 stream=" << stream->id
-                                                     << " target=" << describe_socks5_target(accepted.target)
-                                                     << " atyp=" << socks5_atyp_name(accepted.target.atyp)
-                                                     << " proto="
-                                                     << (accepted.protocol == LocalProxyProtocol::Socks5 ? "socks5" :
-                                                         (accepted.protocol == LocalProxyProtocol::HttpConnect ? "http-connect"
-                                                                                                               : "http")));
-
-    queue_frame(FrameType::Open, stream->id, encode_open_request(accepted.target));
-    PROXY_LOG(Debug, "[client] 已发送 Open 帧，异步等待远端确认 stream=" << stream->id);
-}
-
-void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream) {
+void ClientRuntime::close_local_stream(const std::shared_ptr<LocalStream>& stream) {
     socket_t sock = kInvalidSocket;
+    int32_t h2sid = -1;
+    bool need_resume = false;
     {
-        std::lock_guard<std::mutex> lock(stream->mutex);
-        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
-            return;
-        }
-        sock = stream->sock;
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        if (stream->sock == kInvalidSocket) return;  // already closed
+        sock          = stream->sock;
+        stream->sock  = kInvalidSocket;
+        h2sid         = stream->h2_stream_id;
+        stream->uplink_eof = true;
+        need_resume   = stream->uplink_deferred;
     }
+    if (sock != kInvalidSocket) close_socket(sock);
 
-    std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
-#ifdef _WIN32
-    const int ret = ::recv(sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
-#else
-    const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
-#endif
-    if (ret < 0) {
-        const int code = proxy::last_socket_error_code();
-        if (is_socket_would_block(code)) {
-            return;
+    // Wake io_thread to send END_STREAM via data provider
+    if (need_resume && h2sid >= 0) {
+        {
+            std::lock_guard<std::mutex> lock(resume_mutex_);
+            pending_resume_.insert(h2sid);
         }
+        signal_notifier(io_notifier_, "client", "local-eof");
     }
-    if (ret <= 0) {
-        close_stream(stream->id, true);
-        return;
-    }
-    PROXY_LOG(Debug, "[client] 读取本地上行数据 stream=" << stream->id << " bytes=" << ret);
-    queue_frame(FrameType::Data, stream->id,
-                std::vector<std::uint8_t>(buf.begin(), buf.begin() + ret));
-}
-
-void ClientRuntime::close_stream(std::uint32_t id, bool notify_remote) {
-    std::shared_ptr<LocalStream> stream;
-    socket_t sock = kInvalidSocket;
-    {
-        std::lock_guard<std::mutex> lock(streams_mutex_);
-        const auto it = streams_.find(id);
-        if (it == streams_.end()) {
-            return;
-        }
-        stream = it->second;
-        streams_.erase(it);
-    }
-    if (notify_remote && running_) {
-        PROXY_LOG(Debug, "[client] 关闭本地流并通知远端 stream=" << id);
-        queue_frame(FrameType::Close, id, {});
-    } else {
-        PROXY_LOG(Debug, "[client] 关闭本地流 stream=" << id);
-    }
-    {
-        std::lock_guard<std::mutex> lock(stream->mutex);
-        if (stream->state == LocalStream::State::Closed) {
-            return;
-        }
-        sock = stream->sock;
-        stream->sock = kInvalidSocket;
-        stream->state = LocalStream::State::Closed;
-        stream->pending_downlink.clear();
-        stream->pending_downlink_offset = 0;
-    }
-    close_socket(sock);
-    stream->cv.notify_all();
-    signal_notifier(local_loop_notifier_, "client", "local-loop");
+    signal_notifier(local_loop_notifier_, "client", "local-closed");
 }
 
 void ClientRuntime::close_all_streams() {
-    std::map<std::uint32_t, std::shared_ptr<LocalStream>> current;
+    std::map<int32_t, std::shared_ptr<LocalStream>> current;
     {
         std::lock_guard<std::mutex> lock(streams_mutex_);
         current.swap(streams_);
     }
     for (auto& kv : current) {
         socket_t sock = kInvalidSocket;
-        std::lock_guard<std::mutex> lock(kv.second->mutex);
-        sock = kv.second->sock;
-        kv.second->sock = kInvalidSocket;
-        kv.second->state = LocalStream::State::Closed;
-        kv.second->pending_downlink.clear();
-        kv.second->pending_downlink_offset = 0;
-        kv.second->cv.notify_all();
-        close_socket(sock);
+        {
+            std::lock_guard<std::mutex> sl(kv.second->mutex);
+            sock              = kv.second->sock;
+            kv.second->sock   = kInvalidSocket;
+            kv.second->state  = LocalStream::State::Closed;
+            kv.second->uplink_eof = true;
+        }
+        if (sock != kInvalidSocket) close_socket(sock);
     }
-}
-
-bool ClientRuntime::is_stream_active(std::uint32_t id) {
-    std::lock_guard<std::mutex> lock(streams_mutex_);
-    return streams_.find(id) != streams_.end();
 }
 
 socket_t ClientRuntime::make_listener(std::uint16_t port, std::string host) {
     socket_t sock = static_cast<socket_t>(::socket(AF_INET, SOCK_STREAM, 0));
-    if (sock == kInvalidSocket) {
-        return kInvalidSocket;
-    }
+    if (sock == kInvalidSocket) return kInvalidSocket;
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
-    
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    
-    // 处理 host
+    addr.sin_port   = htons(port);
     if (host.empty() || host == "localhost" || host == "127.0.0.1") {
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     } else if (host == "0.0.0.0" || host == "*") {
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
     } else if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-        close_socket(sock);
-        return kInvalidSocket;  // 无效的 IP 地址
+        close_socket(sock); return kInvalidSocket;
     }
-    
     if (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close_socket(sock);
-        return kInvalidSocket;
+        close_socket(sock); return kInvalidSocket;
     }
     if (::listen(sock, 128) != 0) {
-        close_socket(sock);
-        return kInvalidSocket;
+        close_socket(sock); return kInvalidSocket;
     }
     return sock;
 }
 
 ClientConfig parse_args(int argc, char** argv) {
     ClientConfig cfg;
-    if (argc >= 2) {
-        parse_host_port(argv[1], cfg.server_host, cfg.server_port);
-    }
+    if (argc >= 2) parse_host_port(argv[1], cfg.server_host, cfg.server_port);
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--listen" && i + 1 < argc) {
+        if      (arg == "--listen"          && i + 1 < argc)
             cfg.listen_port = static_cast<std::uint16_t>(std::stoi(argv[++i]));
-        } else if (arg == "--auth-password" && i + 1 < argc) {
-            cfg.auth_password = argv[++i];
-        } else if (arg == "--listen-host" && i + 1 < argc) {
+        else if (arg == "--listen-host"     && i + 1 < argc)
             cfg.listen_host = argv[++i];
-        } else if (arg == "--auth-password" && i + 1 < argc) {
+        else if (arg == "--auth-password"   && i + 1 < argc)
             cfg.auth_password = argv[++i];
-        } else if (arg == "--ech-config" && i + 1 < argc) {
+        else if (arg == "--ech-config"      && i + 1 < argc)
             cfg.ech_config = argv[++i];
-        } else if (arg == "--disable-ech-grease") {
+        else if (arg == "--disable-ech-grease")
             cfg.enable_ech_grease = false;
-        } else if (arg == "--log-level" && i + 1 < argc) {
+        else if (arg == "--log-level"       && i + 1 < argc) {
             LogLevel level = LogLevel::Info;
-            if (parse_log_level(argv[++i], level)) {
-                cfg.log_level = level;
-            }
+            if (parse_log_level(argv[++i], level)) cfg.log_level = level;
         }
     }
     return cfg;
@@ -1690,24 +1355,19 @@ ClientConfig parse_args(int argc, char** argv) {
 void print_usage() {
     std::cout
         << "用法:\n"
-        << "  client <server_host:port> [--listen <port>]\n\n"
-        << "说明:\n"
-        << "  <server_host:port>   远端 HTTP/2 TLS 隧道服务地址\n"
-        << "  --listen <port>      本地代理监听端口, 默认 1080 (支持 SOCKS5 + HTTP)\n"
-        << "  --listen-host <0.0.0.0>      本地代理监听地址, 默认 127.0.0.1\n"
-        << "  --auth-password <pw> 发送到服务端 /api/tunnel/* 的预共享密码\n"
-        << "  --log-level <level>  日志级别: error|warn|info|debug, 默认 info\n\n"
-        << "  --ech-config <b64>   base64-encoded ECHConfigList\n"
-        << "  --disable-ech-grease do not send GREASE ECH without a config list\n"
-        << "行为:\n"
-        << "  1. 建立 1 条长期 HTTP/2 TLS 连接\n"
-        << "  2. 使用 open stream 创建隧道会话\n"
-        << "  3. 使用一个长期 events stream 接收下行事件\n"
-        << "  4. 使用一个或多个 upload stream 上传数据帧\n\n"
+        << "  client <server_host:port> [options]\n\n"
+        << "选项:\n"
+        << "  --listen <port>           本地代理监听端口, 默认 1080\n"
+        << "  --listen-host <addr>      本地代理监听地址, 默认 127.0.0.1\n"
+        << "  --auth-password <pw>      共享密码 (x-tunnel-auth 头)\n"
+        << "  --ech-config <base64>     base64-encoded ECHConfigList\n"
+        << "  --disable-ech-grease      关闭 ECH GREASE\n"
+        << "  --log-level <level>       error|warn|info|debug, 默认 info\n\n"
+        << "协议:\n"
+        << "  每条本地连接对应一条 HTTP/2 CONNECT 流 (RFC 7540 §8.3)\n\n"
         << "示例:\n"
         << "  client 127.0.0.1:8443\n"
-        << "  client 117.72.179.59:8443 --listen 1088 --auth-password secret123\n"
-        << "  client example.com:8443 --ech-config <base64-ech-config-list>\n";
+        << "  client example.com:8443 --listen 1088 --auth-password secret123\n";
 }
 
 } // namespace
@@ -1716,45 +1376,31 @@ int main(int argc, char** argv) {
     try {
 #ifdef _WIN32
     WSADATA wsa{};
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::cerr << "WSAStartup 失败\n";
-        return 1;
-    }
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { std::cerr << "WSAStartup 失败\n"; return 1; }
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 #endif
-
     std::cout.setf(std::ios::unitbuf);
     std::cerr.setf(std::ios::unitbuf);
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--help" || arg == "-h") {
-            print_usage();
-            return 0;
-        }
+        if (arg == "--help" || arg == "-h") { print_usage(); return 0; }
     }
 
     const ClientConfig cfg = parse_args(argc, argv);
     set_log_level(cfg.log_level);
-    if (cfg.server_host.empty()) {
-        print_usage();
-        return 1;
-    }
+    if (cfg.server_host.empty()) { print_usage(); return 1; }
 
-    const socket_t listener = ClientRuntime::make_listener(cfg.listen_port,cfg.listen_host);
+    const socket_t listener = ClientRuntime::make_listener(cfg.listen_port, cfg.listen_host);
     if (listener == kInvalidSocket) {
-        PROXY_LOG(Error, "[client] 本地监听失败");
+        PROXY_LOG(Error, "[client] 本地监听失败 port=" << cfg.listen_port);
         return 1;
     }
     struct ListenerCloser {
         socket_t sock;
-        ~ListenerCloser() {
-            if (sock != kInvalidSocket) {
-                close_socket(sock);
-            }
-        }
-    } listener_closer{listener};
+        ~ListenerCloser() { if (sock != kInvalidSocket) close_socket(sock); }
+    } lc{listener};
 
     while (true) {
         ClientRuntime runtime(cfg, listener);
@@ -1762,14 +1408,12 @@ int main(int argc, char** argv) {
             PROXY_LOG(Info, "[client] runtime.start() 正常结束");
             return 0;
         }
-
         if (!runtime.should_retry()) {
             PROXY_LOG(Error, "[client] runtime.start() 返回失败");
             return 1;
         }
-
         PROXY_LOG(Warn, "[client] 隧道连接已断开，3 秒后自动重连"
-                            << (runtime.last_error().empty() ? "" : " reason=" + runtime.last_error()));
+                  << (runtime.last_error().empty() ? "" : " reason=" + runtime.last_error()));
         std::this_thread::sleep_for(std::chrono::seconds(3));
     }
     } catch (const std::exception& ex) {
