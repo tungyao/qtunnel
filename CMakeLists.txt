@@ -65,7 +65,9 @@ add_executable(qtunnel_server
     src/server_connection.cpp
     src/http2_session_driver.cpp
     src/upstream_peer.cpp
+    src/dns_resolver.cpp
     src/common/reactor.cpp
+    src/common/buffer_pool.cpp
     ${HOMEPAGE_HTML_HEADER}
 )
 add_dependencies(qtunnel_server generate_homepage_header)

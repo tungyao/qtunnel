@@ -517,8 +517,11 @@ void ServerConnection::on_connect_request(int32_t h2_stream_id,
     server_upstream::Peer peer;
     bool connected = false;
     std::string error;
+    auto* dns_resolver = hooks_.get_dns_resolver ? hooks_.get_dns_resolver() : nullptr;
+    auto* buffer_pool = hooks_.get_buffer_pool ? hooks_.get_buffer_pool() : nullptr;
+    peer.buffer_pool = buffer_pool;  // Set buffer pool for this peer
     if (!server_upstream::start_connect(config_, h2_stream_id, 0x03,
-                                         host, port, peer, connected, error)) {
+                                         host, port, peer, connected, error, dns_resolver)) {
         PROXY_LOG(Error, "[server] conn_id=" << conn_id_
                       << " stream=" << h2_stream_id << " start_connect failed: " << error);
         h2_driver_.notify_upstream_failed(h2_stream_id, error);

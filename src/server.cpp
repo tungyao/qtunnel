@@ -1,6 +1,7 @@
 #include "common/logging.h"
 #include "common/reactor.h"
 #include "common/socks5.h"
+#include "common/buffer_pool.h"
 #include "server_connection.h"
 #include "server_shared.h"
 
@@ -209,7 +210,9 @@ private:
                 std::string err;
                 reactor_.disarm(fd, err);
                 fd_owners_.erase(fd);
-            }
+            },
+            [this]() -> proxy::DnsResolver* { return nullptr; },  // DNS resolver not yet initialized
+            [this]() -> proxy::BufferPool* { return &buffer_pool_; }
         };
     }
 
@@ -268,6 +271,7 @@ private:
     ServerConfig config_;
     socket_t listener_ = kInvalidSocket;
     Reactor reactor_;
+    proxy::BufferPool buffer_pool_{512};  // Support up to 512 blocks (32MB total)
     std::unordered_map<socket_t, FdOwner> fd_owners_;
     std::map<socket_t, std::unique_ptr<ServerConnection>> connections_;
 };

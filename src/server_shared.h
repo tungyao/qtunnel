@@ -7,6 +7,11 @@
 #include <functional>
 #include <string>
 
+namespace proxy {
+    class DnsResolver;
+    class BufferPool;
+}
+
 struct ServerConfig {
     enum class TargetType {
         Direct,
@@ -41,4 +46,6 @@ struct RuntimeHooks {
     std::function<proxy::Reactor&()> get_reactor;
     std::function<void(proxy::socket_t, ServerConnection*, int32_t)> register_upstream;
     std::function<void(proxy::socket_t)> unregister_fd;
+    std::function<proxy::DnsResolver*()> get_dns_resolver;
+    std::function<proxy::BufferPool*()> get_buffer_pool;
 };
