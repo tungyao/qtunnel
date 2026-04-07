@@ -35,6 +35,7 @@
 #else
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #endif
 
 namespace {
@@ -167,14 +168,34 @@ bool recv_http_headers(socket_t sock, std::string& raw_request, std::size_t& hea
     header_end = std::string::npos;
     constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
     std::array<char, 4096> buf{};
+
     while (raw_request.size() < kMaxHeaderBytes) {
 #ifdef _WIN32
         const int ret = ::recv(sock, buf.data(), static_cast<int>(buf.size()), 0);
 #else
         const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
 #endif
-        if (ret == 0) { error = "HTTP 客户端已断开"; return false; }
-        if (ret < 0)  { error = "读取 HTTP 请求头失败"; return false; }
+
+        if (ret == 0) {
+            error = "HTTP 客户端已断开";
+            return false;
+        }
+        if (ret < 0) {
+            // SO_RCVTIMEO 超时时返回 EAGAIN/EWOULDBLOCK
+#ifdef _WIN32
+            const int recv_errno = WSAGetLastError();
+            if (recv_errno == WSAETIMEDOUT || recv_errno == WSAEWOULDBLOCK) {
+#else
+            const int recv_errno = errno;
+            if (recv_errno == EAGAIN || recv_errno == EWOULDBLOCK) {
+#endif
+                error = "读取 HTTP 请求头超时";
+            } else {
+                error = "读取 HTTP 请求头失败";
+            }
+            return false;
+        }
+
         raw_request.append(buf.data(), static_cast<std::size_t>(ret));
         header_end = raw_request.find("\r\n\r\n");
         if (header_end != std::string::npos) return true;
@@ -1254,6 +1275,27 @@ void ClientRuntime::accept_one() {
     socklen_t slen = sizeof(ss);
     socket_t sock = ::accept(listener_, reinterpret_cast<sockaddr*>(&ss), &slen);
     if (sock == kInvalidSocket) return;
+
+    // 设置接收超时为 5 秒（防止握手时长时间阻塞）
+    // 使用 SO_RCVTIMEO 比非阻塞模式更简洁，无需处理 EAGAIN
+#ifdef _WIN32
+    DWORD timeout_ms = 5000;
+    if (::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) < 0) {
+        PROXY_LOG(Error, "[client] 设置接收超时失败");
+        close_socket(sock);
+        return;
+    }
+#else
+    struct timeval tv{};
+    tv.tv_sec = 5;   // 5 秒
+    tv.tv_usec = 0;
+    if (::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        PROXY_LOG(Error, "[client] 设置接收超时失败");
+        close_socket(sock);
+        return;
+    }
+#endif
 
     AcceptedProxyRequest accepted;
     std::string error;

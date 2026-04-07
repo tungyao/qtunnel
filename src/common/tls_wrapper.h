@@ -767,12 +767,9 @@ private:
 
         set_chrome_groups(ctx_.get());
         set_chrome_sigalgs(ctx_.get());
-        enable_chrome_features(ctx_.get());   // 包含 GREASE
+        enable_chrome_features(ctx_.get());   // 包含 GREASE 和 permute_extensions
 
-        // === 1. Extensions 随机 permutation（解决 JA4_r / JA4_ro 差异）===
-#if defined(OPENSSL_IS_BORINGSSL)
-        SSL_CTX_set_permute_extensions(ctx_.get(), 1);   // 关键！Chrome 的随机打乱
-#endif
+        // === 1. status_request (OCSP) 由 BoringSSL 默认启用，无需显式配置 ===
 
         // === 2. compress_certificate (brotli) ===
 #if defined(OPENSSL_IS_BORINGSSL)
