@@ -531,6 +531,16 @@ void ServerConnection::on_connect_request(int32_t h2_stream_id,
                   << " stream=" << h2_stream_id << " upstream sock=" << peer.sock
                   << " connected=" << (connected ? "yes" : "no")
                   << " state=" << static_cast<int>(peer.state));
+
+    // Async DNS pending: no socket yet — register the DNS job and wait
+    if (peer.state == server_upstream::State::DnsPending) {
+        if (hooks_.register_dns_job) {
+            hooks_.register_dns_job(peer.dns_job_id, client_fd(), h2_stream_id);
+        }
+        streams_.emplace(h2_stream_id, std::move(peer));
+        return;
+    }
+
     const proxy::socket_t upstream_sock = peer.sock;
     hooks_.register_upstream(upstream_sock, this, h2_stream_id);
     const EventFlags initial_flags = server_upstream::interest(peer);
@@ -629,6 +639,81 @@ void ServerConnection::close_all_upstreams() {
     streams_.clear();
     for (proxy::socket_t s : socks) {
         if (s != proxy::kInvalidSocket) hooks_.unregister_fd(s);
+    }
+}
+
+void ServerConnection::on_dns_result(int32_t h2_stream_id,
+                                      const proxy::DnsResolver::Result& result) {
+    if (closed()) return;
+    auto it = streams_.find(h2_stream_id);
+    if (it == streams_.end()) return;  // Stream was closed while DNS was pending
+    auto& peer = it->second;
+    if (peer.state != server_upstream::State::DnsPending) return;
+
+    // Ensure buffer pool is set (in case it wasn't from on_connect_request)
+    if (!peer.buffer_pool && hooks_.get_buffer_pool) {
+        peer.buffer_pool = hooks_.get_buffer_pool();
+    }
+
+    bool connected = false;
+    std::string error;
+    if (!server_upstream::finish_dns_connect(peer, result, connected, error)) {
+        PROXY_LOG(Error, "[server] conn_id=" << conn_id_
+                      << " stream=" << h2_stream_id << " DNS connect failed: " << error);
+        h2_driver_.notify_upstream_failed(h2_stream_id, error);
+        close_stream_only(h2_stream_id);
+        drive_session_send();
+        return;
+    }
+
+    // Socket created: register with reactor
+    const proxy::socket_t upstream_sock = peer.sock;
+    hooks_.register_upstream(upstream_sock, this, h2_stream_id);
+    const EventFlags initial_flags = server_upstream::interest(peer);
+    proxy::Reactor& reactor = hooks_.get_reactor();
+    std::string err;
+    reactor.arm(upstream_sock, initial_flags, err);
+
+    PROXY_LOG(Info, "[server] conn_id=" << conn_id_
+                  << " stream=" << h2_stream_id << " DNS resolved, socket="
+                  << upstream_sock << " connected=" << (connected ? "yes" : "no"));
+
+    if (connected) {
+        bool send_open_ok = false;
+        std::string ferr;
+        if (!server_upstream::finish_nonblocking_connect(peer, send_open_ok, ferr)) {
+            PROXY_LOG(Error, "[server] conn_id=" << conn_id_
+                          << " stream=" << h2_stream_id
+                          << " finish_nonblocking_connect failed: " << ferr);
+            h2_driver_.notify_upstream_failed(h2_stream_id, ferr);
+            close_stream_only(h2_stream_id);
+            drive_session_send();
+            return;
+        }
+        if (send_open_ok) {
+            PROXY_LOG(Info, "[server] conn_id=" << conn_id_
+                          << " stream=" << h2_stream_id << " upstream connected immediately after DNS");
+            h2_driver_.notify_upstream_connected(h2_stream_id);
+            drive_session_send();
+            if (closed()) return;
+            if (streams_.count(h2_stream_id)) {
+                auto& p = streams_.at(h2_stream_id);
+                if (p.state == server_upstream::State::Open && !p.pending_uplink.empty()) {
+                    const std::size_t offset_before = p.pending_uplink_offset;
+                    if (!server_upstream::process_write(p)) {
+                        close_stream_only(h2_stream_id);
+                        drive_session_send();
+                        return;
+                    }
+                    const std::size_t wrote = p.pending_uplink_offset - offset_before;
+                    if (wrote > 0 && p.pending_uplink.empty()) {
+                        p.unconsumed_uplink_bytes -= wrote;
+                        h2_driver_.consume_stream_window(h2_stream_id, wrote);
+                    }
+                }
+                rearm_upstream(h2_stream_id, streams_.at(h2_stream_id));
+            }
+        }
     }
 }
 

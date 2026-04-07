@@ -35,7 +35,7 @@ struct ServerConfig {
 class ServerConnection;
 
 struct FdOwner {
-    enum class Kind { Listener, Client, Upstream };
+    enum class Kind { Listener, Client, Upstream, DnsEvent };
     Kind kind = Kind::Listener;
     ServerConnection* conn = nullptr;
     int32_t h2_stream_id = 0;  // valid when kind == Upstream
@@ -48,4 +48,6 @@ struct RuntimeHooks {
     std::function<void(proxy::socket_t)> unregister_fd;
     std::function<proxy::DnsResolver*()> get_dns_resolver;
     std::function<proxy::BufferPool*()> get_buffer_pool;
+    // Register a pending DNS job: job_id, client_fd of this connection, h2_stream_id
+    std::function<void(int64_t, proxy::socket_t, int32_t)> register_dns_job;
 };

@@ -3,6 +3,7 @@
 #include "common/reactor.h"
 #include "common/tls_wrapper.h"
 #include "common/buffer_pool.h"
+#include "dns_resolver.h"
 #include "server_shared.h"
 
 #include <algorithm>
@@ -117,6 +118,11 @@ bool start_connect(const ServerConfig& config, int32_t h2_stream_id,
                    const std::string& requested_host, std::uint16_t requested_port,
                    Peer& peer_out, bool& connected, std::string& error,
                    proxy::DnsResolver* dns_resolver = nullptr);
+
+// Called after async DNS resolves: creates the socket using resolved addresses.
+// peer must be in DnsPending state on entry; transitions to Connecting on success.
+bool finish_dns_connect(Peer& peer, const proxy::DnsResolver::Result& result,
+                        bool& connected, std::string& error);
 
 bool finish_nonblocking_connect(Peer& peer, bool& send_open_ok, std::string& error);
 bool process_write(Peer& peer);          // returns false on fatal error

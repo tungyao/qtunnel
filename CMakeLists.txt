@@ -114,3 +114,14 @@ target_link_libraries(proxy_tls_ssl INTERFACE ssl crypto)
 
 target_link_libraries(qtunnel_server PRIVATE proxy_tls_ssl ${PROXY_TLS_LIBRARIES})
 target_link_libraries(qtunnel_client PRIVATE proxy_tls_ssl ${PROXY_TLS_LIBRARIES})
+
+# DNS resolver unit test (Linux only — uses epoll/eventfd)
+if(NOT WIN32)
+    add_executable(test_dns_resolver
+        test/test_dns_resolver.cpp
+        src/dns_resolver.cpp
+    )
+    target_include_directories(test_dns_resolver PRIVATE ${COMMON_INCLUDE_DIR})
+    target_compile_options(test_dns_resolver PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    target_link_libraries(test_dns_resolver PRIVATE pthread)
+endif()

@@ -2,6 +2,7 @@
 #include "common/reactor.h"
 #include "common/socks5.h"
 #include "common/buffer_pool.h"
+#include "dns_resolver.h"
 #include "server_connection.h"
 #include "server_shared.h"
 
@@ -150,6 +151,19 @@ public:
             PROXY_LOG(Error, "[server] reactor arm listener failed: " << error);
             return false;
         }
+#ifndef _WIN32
+        // Register DNS resolver eventfd so we get notified when resolution completes
+        const int dns_efd = dns_resolver_.get_eventfd();
+        if (dns_efd >= 0) {
+            fd_owners_[static_cast<socket_t>(dns_efd)] =
+                FdOwner{FdOwner::Kind::DnsEvent, nullptr, 0};
+            if (!reactor_.arm(static_cast<socket_t>(dns_efd), EventFlags::Readable, error)) {
+                PROXY_LOG(Error, "[server] reactor arm dns eventfd failed: " << error);
+                return false;
+            }
+            PROXY_LOG(Info, "[server] async DNS resolver ready (efd=" << dns_efd << ")");
+        }
+#endif
         return true;
     }
 
@@ -179,6 +193,8 @@ public:
                     accept_ready_clients();
                 } else if (owner.kind == FdOwner::Kind::Client) {
                     owner.conn->on_client_event(readable, writable);
+                } else if (owner.kind == FdOwner::Kind::DnsEvent) {
+                    if (readable) handle_dns_event();
                 } else {
                     owner.conn->on_upstream_event(owner.h2_stream_id, readable, writable);
                 }
@@ -211,9 +227,37 @@ private:
                 reactor_.disarm(fd, err);
                 fd_owners_.erase(fd);
             },
-            [this]() -> proxy::DnsResolver* { return nullptr; },  // DNS resolver not yet initialized
-            [this]() -> proxy::BufferPool* { return &buffer_pool_; }
+            [this]() -> proxy::DnsResolver* { return &dns_resolver_; },
+            [this]() -> proxy::BufferPool* { return &buffer_pool_; },
+            [this](int64_t job_id, socket_t client_fd, int32_t h2_stream_id) {
+                dns_pending_[job_id] = {client_fd, h2_stream_id};
+            }
         };
+    }
+
+    void handle_dns_event() {
+        auto results = dns_resolver_.drain_results();
+        PROXY_LOG(Info, "[server] DNS event: " << results.size() << " results");
+        for (auto& result : results) {
+            auto pit = dns_pending_.find(result.job_id);
+            if (pit == dns_pending_.end()) {
+                PROXY_LOG(Warn, "[server] DNS result for unknown job_id " << result.job_id);
+                continue;
+            }
+            const socket_t client_fd   = pit->second.first;
+            const int32_t  h2_stream_id = pit->second.second;
+            dns_pending_.erase(pit);
+
+            auto cit = connections_.find(client_fd);
+            if (cit == connections_.end()) {
+                PROXY_LOG(Warn, "[server] DNS result for closed connection " << client_fd);
+                continue;
+            }
+            if (cit->second->closed()) continue;
+            PROXY_LOG(Info, "[server] delivering DNS result to stream=" << h2_stream_id
+                          << " addrs=" << result.addrs.size());
+            cit->second->on_dns_result(h2_stream_id, result);
+        }
     }
 
     void accept_ready_clients() {
@@ -272,6 +316,9 @@ private:
     socket_t listener_ = kInvalidSocket;
     Reactor reactor_;
     proxy::BufferPool buffer_pool_{512};  // Support up to 512 blocks (32MB total)
+    proxy::DnsResolver dns_resolver_;     // Async DNS thread pool + eventfd
+    // Pending DNS jobs: job_id → (client_fd, h2_stream_id)
+    std::unordered_map<int64_t, std::pair<socket_t, int32_t>> dns_pending_;
     std::unordered_map<socket_t, FdOwner> fd_owners_;
     std::map<socket_t, std::unique_ptr<ServerConnection>> connections_;
 };

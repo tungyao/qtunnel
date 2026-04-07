@@ -40,7 +40,7 @@ void DnsResolver::worker_thread_main() {}
 
 #else
 
-// Linux/Unix implementation with eventfd and thread pool
+// Linux/Unix implementation with eventfd, thread pool, and TTL cache
 DnsResolver::DnsResolver(int num_threads) {
     // Create eventfd for signaling completion
     eventfd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -74,11 +74,51 @@ DnsResolver::~DnsResolver() {
     }
 }
 
+void DnsResolver::sort_ipv4_first(std::vector<sockaddr_storage>& addrs) {
+    std::stable_sort(addrs.begin(), addrs.end(),
+        [](const sockaddr_storage& a, const sockaddr_storage& b) {
+            const bool a_v4 = (a.ss_family == AF_INET);
+            const bool b_v4 = (b.ss_family == AF_INET);
+            return a_v4 && !b_v4;  // IPv4 < IPv6 in ordering
+        });
+}
+
+void DnsResolver::post_result(Result result) {
+    {
+        std::lock_guard<std::mutex> lock(result_mutex_);
+        completed_results_.push(std::move(result));
+    }
+    uint64_t counter = 1;
+    ssize_t _w = write(eventfd_, &counter, sizeof(counter)); (void)_w;
+}
+
 int64_t DnsResolver::submit(const std::string& host, uint16_t port) {
-    int64_t job_id;
+    // Check cache before hitting the network
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        auto it = cache_.find(host);
+        if (it != cache_.end() &&
+            it->second.expiry > std::chrono::steady_clock::now()) {
+            // Cache hit: post result immediately without spawning a job
+            const int64_t job_id = next_job_id_.fetch_add(1);
+            Result result;
+            result.job_id = job_id;
+            result.host   = host;
+            result.port   = port;
+            result.addrs  = it->second.addrs;  // Already IPv4-first sorted
+            post_result(std::move(result));
+            return job_id;
+        }
+        // Expired entry: evict lazily
+        if (it != cache_.end()) {
+            cache_.erase(it);
+        }
+    }
+
+    // Cache miss: enqueue to worker thread
+    const int64_t job_id = next_job_id_.fetch_add(1);
     {
         std::lock_guard<std::mutex> lock(job_mutex_);
-        job_id = next_job_id_++;
         pending_jobs_.push(Job{job_id, host, port});
     }
     job_cv_.notify_one();
@@ -86,18 +126,15 @@ int64_t DnsResolver::submit(const std::string& host, uint16_t port) {
 }
 
 std::vector<DnsResolver::Result> DnsResolver::drain_results() {
-    // Clear the eventfd counter
+    // Clear the eventfd counter (read all accumulated increments)
     uint64_t counter = 0;
-    (void)read(eventfd_, &counter, sizeof(counter));
+    ssize_t _r = read(eventfd_, &counter, sizeof(counter)); (void)_r;
 
-    // Drain all results
     std::vector<Result> results;
-    {
-        std::lock_guard<std::mutex> lock(result_mutex_);
-        while (!completed_results_.empty()) {
-            results.push_back(std::move(completed_results_.front()));
-            completed_results_.pop();
-        }
+    std::lock_guard<std::mutex> lock(result_mutex_);
+    while (!completed_results_.empty()) {
+        results.push_back(std::move(completed_results_.front()));
+        completed_results_.pop();
     }
     return results;
 }
@@ -107,54 +144,59 @@ void DnsResolver::worker_thread_main() {
         Job job;
         {
             std::unique_lock<std::mutex> lock(job_mutex_);
-            // Wait for a job or shutdown signal
             job_cv_.wait(lock, [this]() { return !pending_jobs_.empty() || shutdown_; });
-
-            if (shutdown_ && pending_jobs_.empty()) {
-                break;
-            }
-
-            if (pending_jobs_.empty()) {
-                continue;
-            }
-
+            if (shutdown_ && pending_jobs_.empty()) break;
+            if (pending_jobs_.empty()) continue;
             job = std::move(pending_jobs_.front());
             pending_jobs_.pop();
         }
 
-        // Perform DNS resolution (blocking, outside of lock)
+        // Perform DNS resolution (blocking, no lock held)
         Result result;
         result.job_id = job.id;
-        result.host = job.host;
-        result.port = job.port;
+        result.host   = job.host;
+        result.port   = job.port;
 
+        // Try IPv4 first, then IPv6 as fallback
         struct addrinfo hints {};
-        hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
-
-        struct addrinfo* res = nullptr;
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%u", job.port);
 
-        // Try IPv4 first
-        if (getaddrinfo(job.host.c_str(), port_str, &hints, &res) == 0) {
-            for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
-                sockaddr_storage sa;
+        hints.ai_family = AF_INET;
+        struct addrinfo* res4 = nullptr;
+        if (getaddrinfo(job.host.c_str(), port_str, &hints, &res4) == 0) {
+            for (struct addrinfo* ai = res4; ai != nullptr; ai = ai->ai_next) {
+                sockaddr_storage sa{};
                 std::memcpy(&sa, ai->ai_addr, ai->ai_addrlen);
                 result.addrs.push_back(sa);
             }
-            freeaddrinfo(res);
+            freeaddrinfo(res4);
         }
 
-        // Post result and signal reactor
-        {
-            std::lock_guard<std::mutex> lock(result_mutex_);
-            completed_results_.push(std::move(result));
+        hints.ai_family = AF_INET6;
+        struct addrinfo* res6 = nullptr;
+        if (getaddrinfo(job.host.c_str(), port_str, &hints, &res6) == 0) {
+            for (struct addrinfo* ai = res6; ai != nullptr; ai = ai->ai_next) {
+                sockaddr_storage sa{};
+                std::memcpy(&sa, ai->ai_addr, ai->ai_addrlen);
+                result.addrs.push_back(sa);
+            }
+            freeaddrinfo(res6);
         }
 
-        // Signal the reactor via eventfd
-        uint64_t counter = 1;
-        (void)write(eventfd_, &counter, sizeof(counter));
+        // Ensure IPv4 addresses are first (in case OS returned mixed results)
+        sort_ipv4_first(result.addrs);
+
+        // Store in cache if we got at least one address
+        if (!result.addrs.empty()) {
+            const auto expiry = std::chrono::steady_clock::now()
+                              + std::chrono::seconds(kCacheTtlSeconds);
+            std::lock_guard<std::mutex> lock(cache_mutex_);
+            cache_[job.host] = CacheEntry{result.addrs, expiry};
+        }
+
+        post_result(std::move(result));
     }
 }
 

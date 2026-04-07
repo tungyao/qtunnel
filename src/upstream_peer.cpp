@@ -156,6 +156,8 @@ bool create_nonblocking_tcp_socket(const std::string& host, uint16_t port,
 namespace server_upstream {
 
 proxy::EventFlags interest(const Peer& peer) {
+    if (peer.state == State::DnsPending)
+        return EventFlags::None;  // No socket yet; waiting for async DNS
     if (peer.state == State::Connecting)
         return EventFlags::Readable | EventFlags::Writable;
     if (peer.state == State::ProxyMethodWrite ||
@@ -190,15 +192,32 @@ bool start_connect(const ServerConfig& config, int32_t h2_stream_id,
             connect_port = requested_port;
         }
     }
-    PROXY_LOG(Info, "[upstream] stream=" << h2_stream_id
-                  << " connecting to " << connect_host << ":" << connect_port
-                  << " use_socks5=" << (use_socks5 ? "yes" : "no"));
     Peer peer;
     peer.h2_stream_id    = h2_stream_id;
     peer.requested_atyp  = requested_atyp;
     peer.requested_host  = requested_host;
     peer.requested_port  = requested_port;
     peer.use_socks5      = use_socks5;
+
+    // Try async DNS if resolver is available and functional
+    if (dns_resolver && dns_resolver->get_eventfd() >= 0) {
+        const int64_t job_id = dns_resolver->submit(connect_host, connect_port);
+        if (job_id > 0) {
+            PROXY_LOG(Info, "[upstream] stream=" << h2_stream_id
+                          << " submitted async DNS for " << connect_host << ":" << connect_port
+                          << " job_id=" << job_id);
+            peer.state      = State::DnsPending;
+            peer.dns_job_id = job_id;
+            connected       = false;
+            peer_out        = std::move(peer);
+            return true;
+        }
+    }
+    // Async DNS not available (Windows, macOS, or eventfd failed) — use sync DNS
+
+    PROXY_LOG(Info, "[upstream] stream=" << h2_stream_id
+                  << " connecting to " << connect_host << ":" << connect_port
+                  << " use_socks5=" << (use_socks5 ? "yes" : "no") << " (sync DNS)");
     if (!create_nonblocking_tcp_socket(connect_host, connect_port,
                                        peer.sock, connected, error)) {
         PROXY_LOG(Error, "[upstream] stream=" << h2_stream_id
@@ -209,6 +228,49 @@ bool start_connect(const ServerConfig& config, int32_t h2_stream_id,
                   << " socket=" << peer.sock << " connected=" << (connected ? "yes" : "no"));
     peer_out = std::move(peer);
     return true;
+}
+
+bool finish_dns_connect(Peer& peer, const proxy::DnsResolver::Result& result,
+                        bool& connected, std::string& error) {
+    connected = false;
+    if (result.addrs.empty()) {
+        error = "DNS resolution failed for " + result.host;
+        return false;
+    }
+    PROXY_LOG(Info, "[upstream] stream=" << peer.h2_stream_id
+                  << " DNS resolved " << result.host << " to " << result.addrs.size()
+                  << " addr(s), connecting...");
+    for (const auto& sa : result.addrs) {
+        const int family = static_cast<int>(sa.ss_family);
+        const socket_t cand = static_cast<socket_t>(
+            ::socket(family, SOCK_STREAM, 0));
+        if (cand == kInvalidSocket) continue;
+        std::string nb_error;
+        if (!set_socket_nonblocking(cand, true, nb_error)) {
+            close_socket(cand);
+            continue;
+        }
+        const socklen_t addrlen = (family == AF_INET6)
+            ? static_cast<socklen_t>(sizeof(sockaddr_in6))
+            : static_cast<socklen_t>(sizeof(sockaddr_in));
+        const int ret = ::connect(cand,
+            reinterpret_cast<const sockaddr*>(&sa), addrlen);
+        if (ret == 0) {
+            peer.sock  = cand;
+            peer.state = State::Connecting;
+            connected  = true;
+            return true;
+        }
+        if (socket_connect_in_progress()) {
+            peer.sock  = cand;
+            peer.state = State::Connecting;
+            return true;
+        }
+        error = proxy::socket_error_string();
+        close_socket(cand);
+    }
+    if (error.empty()) error = "connect failed (all DNS addresses exhausted)";
+    return false;
 }
 
 bool finish_nonblocking_connect(Peer& peer, bool& send_open_ok, std::string& error) {
@@ -391,67 +453,64 @@ bool process_read(Peer& peer) {
     }
 
     // Open state: read into ChunkQueue (ET mode: loop until EAGAIN)
-    // Use buffer pool if available, fallback to stack buffer
+    // Initialize pool reference from peer if not already set
     if (!peer.pending_downlink.pool && peer.buffer_pool) {
         peer.pending_downlink.pool = peer.buffer_pool;
     }
 
     while (true) {
-        // Acquire a block from the pool if available
+        // If pool is available, try to acquire a block
         proxy::BufferPool::Block* block = nullptr;
         if (peer.pending_downlink.pool) {
             block = peer.pending_downlink.pool->acquire();
             if (!block) {
-                // Pool exhausted, can't read more
+                // Pool exhausted
                 break;
             }
         }
 
-        // Read data
-        int ret;
-        if (block) {
-            // Use pool block
-#ifdef _WIN32
-            ret = ::recv(peer.sock,
-                        reinterpret_cast<char*>(block->data),
-                        static_cast<int>(proxy::BufferPool::kBlockSize), 0);
-#else
-            ret = static_cast<int>(::recv(peer.sock, block->data,
-                                         proxy::BufferPool::kBlockSize, 0));
-#endif
-            if (ret > 0) {
-                block->used = static_cast<std::size_t>(ret);
-                peer.pending_downlink.push(block);
-            } else if (ret == 0) {
-                // EOF - release the unused block and return
-                if (peer.pending_downlink.pool) {
-                    peer.pending_downlink.pool->release(block);
-                }
-                return false;  // Connection closed
-            } else {
-                // ret < 0 - error
-                if (is_socket_would_block(proxy::last_socket_error_code())) {
-                    // Would block - release the unused block and break
-                    if (peer.pending_downlink.pool) {
-                        peer.pending_downlink.pool->release(block);
-                    }
-                    break;
-                } else {
-                    // Real error - release and return
-                    if (peer.pending_downlink.pool) {
-                        peer.pending_downlink.pool->release(block);
-                    }
-                    return false;  // Fatal error
-                }
+        if (!block) {
+            // No block available (pool unavailable or exhausted) — can't read more
+            if (!peer.pending_downlink.pool) {
+                PROXY_LOG(Error, "[upstream] stream=" << peer.h2_stream_id
+                                << " buffer pool not available, cannot read upstream data");
             }
-        } else {
-            // No pool available - shouldn't happen since buffer_pool is always provided
-            // by ServerConnection, but if it does we can't proceed safely
-            PROXY_LOG(Warn, "[upstream] stream=" << peer.h2_stream_id
-                            << " no buffer pool available, stopping reads");
             break;
         }
+
+        // Read data into the pool block
+        int ret;
+#ifdef _WIN32
+        ret = ::recv(peer.sock,
+                    reinterpret_cast<char*>(block->data),
+                    static_cast<int>(proxy::BufferPool::kBlockSize), 0);
+#else
+        ret = static_cast<int>(::recv(peer.sock, block->data,
+                                     proxy::BufferPool::kBlockSize, 0));
+#endif
+
+        if (ret > 0) {
+            block->used = static_cast<std::size_t>(ret);
+            peer.pending_downlink.push(block);
+        } else if (ret == 0) {
+            // EOF
+            peer.pending_downlink.pool->release(block);
+            return false;
+        } else {
+            // Error
+            const int code = proxy::last_socket_error_code();
+            if (is_socket_would_block(code)) {
+                // Would block — release block and stop reading for now
+                peer.pending_downlink.pool->release(block);
+                break;
+            } else {
+                // Real error
+                peer.pending_downlink.pool->release(block);
+                return false;
+            }
+        }
     }
+
     return true;
 }
 

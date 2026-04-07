@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common/tls_wrapper.h"
+#include "dns_resolver.h"
 #include "http2_session_driver.h"
 #include "server_shared.h"
 #include "upstream_peer.h"
@@ -30,6 +31,9 @@ public:
     // Called by ServerRuntime on epoll events
     void on_client_event(bool readable, bool writable);
     void on_upstream_event(int32_t h2_stream_id, bool readable, bool writable);
+
+    // Called by ServerRuntime when async DNS resolves for one of this connection's streams
+    void on_dns_result(int32_t h2_stream_id, const proxy::DnsResolver::Result& result);
 
     // Called by ServerRuntime after all I/O events each loop iteration
     void drive_session_send();

@@ -101,7 +101,7 @@ info "Performing health check..."
 max_retries=5
 retry=0
 while [ $retry -lt $max_retries ]; do
-    if curl -s --socks5 "$SERVER_HOST:$SOCKS_PORT" "https://www.google.com" -o /dev/null -w "%{http_code}" 2>/dev/null | grep -q "200\|301\|302\|307\|308"; then
+    if curl -s --socks5 "$SERVER_HOST:$SOCKS_PORT" "https://www.apple.com/library/test/success.html" -o /dev/null -w "%{http_code}" 2>/dev/null | grep -q "200\|301\|302\|307\|308"; then
         info "Health check passed"
         break
     fi
@@ -127,7 +127,7 @@ TEST1_FAILED=0
 for i in $(seq 1 $PARALLEL_CONNECTIONS); do
     (
         curl -s --socks5 "$SERVER_HOST:$SOCKS_PORT" \
-            "https://httpbin.org/get?test=1&id=$i" \
+            "https://baidu.com?test=1&id=$i" \
             -o /dev/null -w "%{http_code}" 2>/dev/null | \
         if grep -q "200\|301\|302"; then
             echo "OK" > "$LOG_DIR/test1_$i.result"
@@ -165,7 +165,7 @@ TEST2_START=$(date +%s%N)
 BIGFILE_LOG="$LOG_DIR/bigfile.log"
 BIG_FILE_START=$(date +%s)
 timeout 180 curl -s --socks5 "$SERVER_HOST:$SOCKS_PORT" \
-    "https://httpbin.org/delay/3?size=test" \
+    "https://speed.cloudflare.com/__down?bytes=10000000" \
     -o "$LOG_DIR/bigfile.bin" -w "HTTP:%{http_code},Size:%{size_download},Speed:%{speed_download}" \
     > "$BIGFILE_LOG" 2>&1 &
 BIGFILE_PID=$!
@@ -179,7 +179,7 @@ TEST2_FAILED=0
 for i in $(seq 1 $PARALLEL_SMALL_REQUESTS); do
     (
         curl -s --socks5 "$SERVER_HOST:$SOCKS_PORT" \
-            "https://httpbin.org/get?test=2&id=$i" \
+            "https://baidu.com?test=2&id=$i" \
             -o /dev/null -w "%{http_code}" 2>/dev/null | \
         if grep -q "200\|301\|302"; then
             echo "OK" > "$LOG_DIR/test2_$i.result"

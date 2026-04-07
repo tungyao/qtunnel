@@ -53,7 +53,7 @@ FAILED=0
 for i in $(seq 1 $PARALLEL_CONNECTIONS); do
     (
         timeout 10 curl -s --socks5 "127.0.0.1:$SOCKS_PORT" \
-            "https://httpbin.org/get?test=$i" \
+            "https://baidu.com?test=$i" \
             -o /dev/null -w "%{http_code}" 2>/dev/null | \
         grep -q "200\|301\|302" && echo "OK" || echo "FAIL"
     ) > /tmp/test_$i.result &
