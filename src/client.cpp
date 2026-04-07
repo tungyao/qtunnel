@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -373,6 +374,7 @@ public:
     bool start();
     bool should_retry() const { return should_retry_; }
     const std::string& last_error() const { return io_error_; }
+    bool was_connected() const { return io_ok_; }
     static socket_t make_listener(std::uint16_t port, std::string host);
 
 private:
@@ -381,6 +383,7 @@ private:
     void process_pending_tunnels();
     void process_pending_resumes();
     bool flush_session();
+    void send_decoy_request(const std::string& path);
 
     // Called from io_thread when server responds 200 to our CONNECT
     void handle_stream_open(int32_t h2_stream_id, const std::shared_ptr<LocalStream>& stream);
@@ -437,6 +440,12 @@ private:
     std::mutex resume_mutex_;
     std::set<int32_t> pending_resume_;
 
+    // Decoy/virtual GET requests (io_thread only, no mutex needed)
+    std::set<int32_t> decoy_stream_ids_;
+    std::chrono::steady_clock::time_point next_decoy_time_;
+    bool decoy_initial_sent_ = false;
+    std::mt19937 decoy_rng_{std::random_device{}()};
+
     EventNotifier io_notifier_;
     EventNotifier local_loop_notifier_;
 };
@@ -467,12 +476,17 @@ bool ClientRuntime::wait_for_io_ready() {
 bool ClientRuntime::start() {
     should_retry_ = false;
     running_ = true;
-    if (listener_ == kInvalidSocket) { io_error_ = "本地监听未初始化"; return false; }
+    if (listener_ == kInvalidSocket) {
+        io_error_ = "本地监听未初始化";
+        should_retry_ = true;  // Allow retry even on initialization error
+        return false;
+    }
 
     std::string notifier_error;
     if (!io_notifier_.open(notifier_error) || !local_loop_notifier_.open(notifier_error)) {
         io_error_ = notifier_error.empty() ? "初始化事件唤醒器失败" : notifier_error;
         running_ = false;
+        should_retry_ = true;  // Allow retry
         return false;
     }
 
@@ -482,6 +496,7 @@ bool ClientRuntime::start() {
     if (!wait_for_io_ready()) {
         PROXY_LOG(Error, "[client] HTTP/2 初始化失败: " << io_error_);
         running_ = false;
+        should_retry_ = true;  // Allow retry on connection failure
         signal_notifier(local_loop_notifier_, "client", "local-loop");
         tls_.shutdown();
         if (io_thread_.joinable()) io_thread_.join();
@@ -582,6 +597,10 @@ void ClientRuntime::io_loop() {
     io_ok_    = true;
     io_ready_ = true;
 
+    // Initialize decoy request timing
+    next_decoy_time_ = std::chrono::steady_clock::now();
+    decoy_initial_sent_ = false;
+
     // ── Event loop ──────────────────────────────────────────────────────────
     EventDispatcher dispatcher;
     if (!dispatcher.valid()) { finish_with_error("初始化 HTTP/2 事件分发器失败"); return; }
@@ -599,6 +618,21 @@ void ClientRuntime::io_loop() {
         // Resume data providers that have new uplink data
         process_pending_resumes();
 
+        // Check and send decoy GET requests
+        auto now = std::chrono::steady_clock::now();
+        if (now >= next_decoy_time_) {
+            if (!decoy_initial_sent_) {
+                send_decoy_request("/");
+                decoy_initial_sent_ = true;
+                // Send favicon 1-3s later
+                next_decoy_time_ = now + std::chrono::milliseconds(1000 + decoy_rng_() % 2000);
+            } else {
+                send_decoy_request("/favicon.ico");
+                // Next decoy request in 30-90s
+                next_decoy_time_ = now + std::chrono::seconds(30 + decoy_rng_() % 60);
+            }
+        }
+
         if (!flush_session()) {
             io_error_ = "发送 HTTP/2 帧失败";
             running_  = false;
@@ -606,7 +640,13 @@ void ClientRuntime::io_loop() {
         }
 
         std::vector<SocketEvent> events;
-        const int ready = dispatcher.wait(events, -1, de);
+        // Calculate wait timeout based on next decoy request time
+        auto ms_until_decoy = std::chrono::duration_cast<std::chrono::milliseconds>(
+            next_decoy_time_ - std::chrono::steady_clock::now()).count();
+        int wait_ms = (ms_until_decoy > 0 && ms_until_decoy < 60000)
+                      ? static_cast<int>(ms_until_decoy)
+                      : 60000;
+        const int ready = dispatcher.wait(events, wait_ms, de);
         if (ready < 0) {
             io_error_ = de;
             running_  = false;
@@ -747,6 +787,70 @@ void ClientRuntime::process_pending_tunnels() {
             streams_[sid] = stream;
         }
         PROXY_LOG(Debug, "[client] H2 CONNECT stream=" << sid << " target=" << authority);
+    }
+}
+
+void ClientRuntime::send_decoy_request(const std::string& path) {
+    // 构造 Chrome 风格的 GET 请求
+    std::vector<std::string> header_storage;
+    header_storage.reserve(14);
+
+    // Pseudo-headers
+    header_storage.push_back(":method");
+    header_storage.push_back("GET");
+    header_storage.push_back(":scheme");
+    header_storage.push_back("https");
+    header_storage.push_back(":authority");
+    header_storage.push_back(cfg_.server_host);
+    header_storage.push_back(":path");
+    header_storage.push_back(path);
+
+    // Regular headers - Chrome style
+    header_storage.push_back("user-agent");
+    header_storage.push_back("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    header_storage.push_back("accept");
+    if (path == "/favicon.ico") {
+        header_storage.push_back("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
+    } else {
+        header_storage.push_back("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+                                "image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+    }
+    header_storage.push_back("accept-language");
+    header_storage.push_back("en-US,en;q=0.9");
+    header_storage.push_back("accept-encoding");
+    header_storage.push_back("gzip, deflate, br");
+
+    if (path == "/favicon.ico") {
+        header_storage.push_back("sec-fetch-dest");
+        header_storage.push_back("image");
+        header_storage.push_back("sec-fetch-mode");
+        header_storage.push_back("no-cors");
+        header_storage.push_back("sec-fetch-site");
+        header_storage.push_back("same-origin");
+    } else {
+        header_storage.push_back("sec-fetch-dest");
+        header_storage.push_back("document");
+        header_storage.push_back("sec-fetch-mode");
+        header_storage.push_back("navigate");
+        header_storage.push_back("sec-fetch-site");
+        header_storage.push_back("none");
+    }
+
+    // Build nghttp2_nv array
+    std::vector<nghttp2_nv> hdrs;
+    for (size_t i = 0; i < header_storage.size(); i += 2) {
+        hdrs.push_back(make_nv(header_storage[i], header_storage[i + 1]));
+    }
+
+    // Submit GET request (nullptr data_provider = no body, nghttp2 auto-sets END_STREAM)
+    const int32_t sid = nghttp2_submit_request2(
+        h2_, nullptr, hdrs.data(), hdrs.size(), nullptr, this);
+    if (sid >= 0) {
+        decoy_stream_ids_.insert(sid);
+        PROXY_LOG(Debug, "[client] 虚拟 GET " << path << " stream=" << sid);
+    } else {
+        PROXY_LOG(Warn, "[client] 虚拟 GET " << path << " 失败: " << nghttp2_strerror(sid));
     }
 }
 
@@ -991,6 +1095,9 @@ int ClientRuntime::on_frame_recv(nghttp2_session* /*session*/, const nghttp2_fra
 int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_id,
                                     uint32_t /*error_code*/, void* user_data) {
     auto* self = static_cast<ClientRuntime*>(user_data);
+
+    // Clean up decoy stream if applicable
+    self->decoy_stream_ids_.erase(stream_id);
 
     std::shared_ptr<LocalStream> stream;
     {
@@ -1402,6 +1509,9 @@ int main(int argc, char** argv) {
         ~ListenerCloser() { if (sock != kInvalidSocket) close_socket(sock); }
     } lc{listener};
 
+    int retry_attempt = 0;
+    std::mt19937 rng(std::random_device{}());
+
     while (true) {
         ClientRuntime runtime(cfg, listener);
         if (runtime.start()) {
@@ -1412,9 +1522,24 @@ int main(int argc, char** argv) {
             PROXY_LOG(Error, "[client] runtime.start() 返回失败");
             return 1;
         }
-        PROXY_LOG(Warn, "[client] 隧道连接已断开，3 秒后自动重连"
+
+        // Reset backoff if connected successfully before
+        if (runtime.was_connected()) {
+            retry_attempt = 0;
+        }
+
+        // Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (capped)
+        const int base_ms = std::min(1000 << retry_attempt, 30000);
+        const int jitter_ms = base_ms * 20 / 100;  // ±20% jitter
+        std::uniform_int_distribution<int> dist(-jitter_ms, jitter_ms);
+        const int wait_ms = base_ms + dist(rng);
+
+        PROXY_LOG(Warn, "[client] 隧道连接已断开，" << (wait_ms / 1000.0) << "s 后自动重连"
+                  << " attempt=" << retry_attempt
                   << (runtime.last_error().empty() ? "" : " reason=" + runtime.last_error()));
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+
+        if (retry_attempt < 5) retry_attempt++;
     }
     } catch (const std::exception& ex) {
         std::cerr << "[client] main 未捕获异常: " << ex.what() << "\n";
