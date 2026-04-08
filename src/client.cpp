@@ -1292,22 +1292,30 @@ int ClientRuntime::on_data_chunk_recv(nghttp2_session* /*session*/, uint8_t /*fl
     auto& stream = it->second;
 
     bool buffered_too_much = false;
+    bool should_signal = false;
     {
         std::lock_guard<std::mutex> sl(stream->mutex);
-        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
+
+        // For SOCKS5 path: stream owns the socket
+        // For HTTP path: socket is owned by LocalConnection, so stream->sock is intentionally invalid
+        bool has_valid_socket = (stream->sock != kInvalidSocket) || (stream->conn != nullptr);
+
+        if (stream->state != LocalStream::State::Open || !has_valid_socket) {
             return 0;
         }
+
         stream->pending_downlink.insert(stream->pending_downlink.end(), data, data + len);
         const std::size_t buffered = stream->pending_downlink.size()
                                    - stream->pending_downlink_offset;
         buffered_too_much = (buffered > kMaxBufferedDownlinkBytes);
+        should_signal = !buffered_too_much;
     }
     PROXY_LOG(Debug, "[client] stream=" << stream_id << " 收到下行数据 bytes=" << len);
 
     if (buffered_too_much) {
         PROXY_LOG(Warn, "[client] stream=" << stream_id << " 下行缓冲过大，关闭流");
         self->close_local_stream(stream);
-    } else {
+    } else if (should_signal) {
         signal_notifier(self->local_loop_notifier_, "client", "downlink");
     }
     return 0;
