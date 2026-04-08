@@ -2331,6 +2331,12 @@ std::shared_ptr<LocalStream> ClientRuntime::try_parse_next_request(
     Socks5Request socks_req;
     bool is_connect = (ascii_lower(method) == "connect");
 
+    // Security: if socket is already in CONNECT mode, reject new requests
+    if (is_connect && conn->is_connect_mode) {
+        PROXY_LOG(Warn, "[client] try_parse_next_request: rejecting CONNECT on already-CONNECT socket");
+        return nullptr;
+    }
+
     if (is_connect) {
         // CONNECT target:port
         const auto colon = target.rfind(':');
