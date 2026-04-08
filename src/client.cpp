@@ -1545,11 +1545,26 @@ void ClientRuntime::accept_and_pump_loop() {
                 auto& conn = conn_it->second;
                 PROXY_LOG(Debug, "[client] accept_and_pump_loop: HTTP connection event"
                               << " readable=" << ev.readable << " writable=" << ev.writable
-                              << " error=" << ev.error << " hangup=" << ev.hangup);
-                if (ev.error || ev.hangup) {
-                    PROXY_LOG(Info, "[client] accept_and_pump_loop: closing connection due to error/hangup");
+                              << " error=" << ev.error << " hangup=" << ev.hangup
+                              << " is_connect_mode=" << conn->is_connect_mode);
+                if (ev.error) {
+                    PROXY_LOG(Warn, "[client] accept_and_pump_loop: socket error, closing connection");
                     close_local_connection(conn);
                     continue;
+                }
+                if (ev.hangup && !ev.readable && !ev.writable) {
+                    // Only close if no pending operations
+                    std::lock_guard<std::mutex> lk(conn->mutex);
+                    bool has_pending = !conn->stream_queue.empty();
+                    if (has_pending) {
+                        PROXY_LOG(Debug, "[client] hangup with pending streams, continuing");
+                    } else {
+                        PROXY_LOG(Info, "[client] accept_and_pump_loop: closing connection due to hangup");
+                        close_local_connection(conn);
+                        continue;
+                    }
+                } else if (ev.hangup) {
+                    PROXY_LOG(Debug, "[client] hangup with readable/writable, continuing to process");
                 }
                 if (ev.writable) {
                     std::string err;
