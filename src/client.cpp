@@ -643,6 +643,22 @@ bool parse_http_boundary(const std::vector<uint8_t>& buf, HttpRequestBoundary& o
     out.method = method;
     out.target = target;
 
+    // For CONNECT, parse the target as host:port
+    if (ascii_lower(method) == "connect") {
+        const auto colon = target.rfind(':');
+        if (colon != std::string::npos) {
+            out.remote_host = target.substr(0, colon);
+            try {
+                out.remote_port = static_cast<uint16_t>(std::stoi(target.substr(colon + 1)));
+            } catch (...) {
+                out.remote_port = 443;  // default HTTPS port
+            }
+        } else {
+            out.remote_host = target;
+            out.remote_port = 443;
+        }
+    }
+
     // Parse headers for Content-Length, Transfer-Encoding, Connection
     std::string line;
     std::size_t body_len = 0;
@@ -971,7 +987,8 @@ void ClientRuntime::process_pending_tunnels() {
             std::lock_guard<std::mutex> lock(streams_mutex_);
             streams_[sid] = stream;
         }
-        PROXY_LOG(Debug, "[client] H2 CONNECT stream=" << sid << " target=" << authority);
+        PROXY_LOG(Info, "[client] H2 CONNECT stream=" << sid << " target=" << authority
+                      << " SUBMITTED (will be flushed in next flush_session call)");
     }
 }
 
@@ -1060,6 +1077,7 @@ void ClientRuntime::process_pending_resumes() {
 }
 
 bool ClientRuntime::flush_session() {
+    std::size_t total_sent = 0;
     while (true) {
         const uint8_t* data = nullptr;
         const auto len = nghttp2_session_mem_send2(h2_, &data);
@@ -1067,8 +1085,15 @@ bool ClientRuntime::flush_session() {
             PROXY_LOG(Error, "[client] nghttp2_session_mem_send2 failed: " << len);
             return false;
         }
-        if (len == 0) return true;
+        if (len == 0) {
+            if (total_sent > 0) {
+                PROXY_LOG(Debug, "[client] flush_session: sent " << total_sent << " bytes total");
+            }
+            return true;
+        }
 
+        PROXY_LOG(Debug, "[client] flush_session: sending " << len << " bytes");
+        total_sent += len;
         if (!tls_.write_all(data, static_cast<std::size_t>(len))) {
             PROXY_LOG(Error, "[client] TLS write_all failed");
             return false;
@@ -1781,12 +1806,17 @@ void ClientRuntime::retry_pending_handshakes() {
                     conn->is_connect_mode = false;
                     conn->recv_buf.assign(handshake.raw_request.begin(), handshake.raw_request.end());
 
+                    PROXY_LOG(Info, "[client] created LocalConnection for HTTP request, "
+                              << "buf_size=" << conn->recv_buf.size()
+                              << " protocol=" << (accepted.protocol == LocalProxyProtocol::HttpConnect ? "CONNECT" : "FORWARD"));
+
                     // Add to connections map
                     connections_[handshake.sock] = conn;
 
                     // Immediately process buffered HTTP request (we're in pump thread, safe to do)
                     // This ensures the request gets parsed and H2 stream created even if socket
                     // won't become readable again (client is waiting for response)
+                    PROXY_LOG(Info, "[client] calling pump_local_connection immediately after handshake");
                     pump_local_connection(conn);
 
                     // Signal in case more processing is needed
@@ -2192,16 +2222,29 @@ void ClientRuntime::close_local_connection(const std::shared_ptr<LocalConnection
 
 std::shared_ptr<LocalStream> ClientRuntime::try_parse_next_request(
     const std::shared_ptr<LocalConnection>& conn) {
-    if (!conn) return nullptr;
+    if (!conn) {
+        PROXY_LOG(Warn, "[client] try_parse_next_request: conn is nullptr");
+        return nullptr;
+    }
 
     std::lock_guard<std::mutex> lk(conn->mutex);
-    if (conn->recv_buf.empty()) return nullptr;
+    if (conn->recv_buf.empty()) {
+        PROXY_LOG(Debug, "[client] try_parse_next_request: recv_buf is empty");
+        return nullptr;
+    }
+
+    PROXY_LOG(Debug, "[client] try_parse_next_request: parsing "
+              << conn->recv_buf.size() << " bytes");
 
     // Parse HTTP request boundary from buffer
     HttpRequestBoundary boundary;
     if (!parse_http_boundary(conn->recv_buf, boundary)) {
+        PROXY_LOG(Debug, "[client] try_parse_next_request: parse_http_boundary returned false (incomplete?)");
         return nullptr;  // Headers not complete yet
     }
+
+    PROXY_LOG(Info, "[client] try_parse_next_request: parsed request method='"
+              << boundary.method << "' target='" << boundary.remote_host << ":" << boundary.remote_port << "'");
 
     // For chunked or keep-alive=false: fall back to non-pipelined mode
     if (boundary.chunked || !boundary.keep_alive) {

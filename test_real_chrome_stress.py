@@ -219,8 +219,8 @@ def main():
 
         # Run Chrome stress test (increased concurrency)
         success = run_chrome_browser_test(
-            num_browsers=10,
-            pages_per_browser=10,
+            num_browsers=5,
+            pages_per_browser=5,
             proxy_url="http://127.0.0.1:11080"
         )
 

@@ -471,6 +471,12 @@ void ServerConnection::read_h2_frames() {
             consumed_total += nread;
             PROXY_LOG(Info, "[server] conn_id=" << conn_id_
                           << " read " << nread << " bytes from client, total=" << consumed_total);
+            // Log stream info for debugging
+            for (const auto& kv : streams_) {
+                PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                              << " stream=" << kv.first << " state=" << static_cast<int>(kv.second.state)
+                              << " pending_uplink=" << kv.second.pending_uplink.size());
+            }
             if (!h2_driver_.receive(buf.data(), nread)) {
                 PROXY_LOG(Error, "[server] conn_id=" << conn_id_
                               << " h2_driver.receive failed");
@@ -490,7 +496,11 @@ void ServerConnection::read_h2_frames() {
             return;
         }
         PROXY_LOG(Error, "[server] conn_id=" << conn_id_
-                      << " TLS read error");
+                      << " TLS read error (status=" << static_cast<int>(status) << ")"
+                      << " err=" << tls_.last_error()
+                      << " streams=" << streams_.size()
+                      << " nread=" << nread
+                      << " consumed_total=" << consumed_total);
         close_connection();
         return;
     }
@@ -581,10 +591,12 @@ void ServerConnection::on_connect_request(int32_t h2_stream_id,
         }
         if (send_open_ok) {
             PROXY_LOG(Info, "[server] conn_id=" << conn_id_
-                          << " stream=" << h2_stream_id << " upstream connected immediately");
+                          << " stream=" << h2_stream_id << " upstream connected immediately, notifying client");
             h2_driver_.notify_upstream_connected(h2_stream_id);
             auto& p = streams_.at(h2_stream_id);
             if (p.state == server_upstream::State::Open && !p.pending_uplink.empty()) {
+                PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                              << " stream=" << h2_stream_id << " flushing pending uplink");
                 const std::size_t offset_before = p.pending_uplink_offset;
                 if (!server_upstream::process_write(p)) {
                     PROXY_LOG(Error, "[server] conn_id=" << conn_id_
@@ -593,6 +605,8 @@ void ServerConnection::on_connect_request(int32_t h2_stream_id,
                     return;
                 }
                 const std::size_t wrote = p.pending_uplink_offset - offset_before;
+                PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                              << " stream=" << h2_stream_id << " flushed " << wrote << " bytes");
                 if (wrote > 0 && p.pending_uplink.empty()) {
                     p.unconsumed_uplink_bytes -= wrote;
                     h2_driver_.consume_stream_window(h2_stream_id, wrote);
@@ -605,25 +619,45 @@ void ServerConnection::on_connect_request(int32_t h2_stream_id,
 void ServerConnection::on_upload_data(int32_t h2_stream_id,
                                        const uint8_t* data, std::size_t len) {
     auto it = streams_.find(h2_stream_id);
-    if (it == streams_.end()) return;
+    if (it == streams_.end()) {
+        PROXY_LOG(Warn, "[server] conn_id=" << conn_id_
+                      << " on_upload_data stream=" << h2_stream_id << " NOT FOUND");
+        return;
+    }
     auto& peer = it->second;
+
+    PROXY_LOG(Info, "[server] conn_id=" << conn_id_
+                  << " on_upload_data stream=" << h2_stream_id
+                  << " len=" << len << " state=" << static_cast<int>(peer.state)
+                  << " pending_before=" << peer.pending_uplink.size());
 
     // Buffer the uplink data; track unconsumed bytes for window management
     peer.pending_uplink.insert(peer.pending_uplink.end(), data, data + len);
     peer.unconsumed_uplink_bytes += len;
 
-    if (peer.state != server_upstream::State::Open) return;
+    if (peer.state != server_upstream::State::Open) {
+        PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                      << " stream=" << h2_stream_id << " not yet Open, buffering data");
+        return;
+    }
 
     // Try to write immediately
     if (!server_upstream::process_write(peer)) {
+        PROXY_LOG(Error, "[server] conn_id=" << conn_id_
+                      << " stream=" << h2_stream_id << " process_write failed");
         close_stream_only(h2_stream_id);
         return;
     }
+
+    PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                  << " stream=" << h2_stream_id << " wrote uplink data, pending_after=" << peer.pending_uplink.size());
 
     // Consume window for bytes that were flushed
     if (peer.unconsumed_uplink_bytes > 0 && peer.pending_uplink.empty()) {
         const std::size_t to_consume = peer.unconsumed_uplink_bytes;
         peer.unconsumed_uplink_bytes = 0;
+        PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                      << " stream=" << h2_stream_id << " consuming " << to_consume << " bytes");
         h2_driver_.consume_stream_window(h2_stream_id, to_consume);
     }
 
