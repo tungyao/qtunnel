@@ -72,7 +72,11 @@ ServerConnection::ServerConnection(proxy::socket_t accepted_socket,
     h2_driver_.set_peer_lookup(
         [this](int32_t stream_id) -> server_upstream::Peer* {
             auto it = streams_.find(stream_id);
-            return (it != streams_.end()) ? &it->second : nullptr;
+            // Check if stream exists and is still valid (not being deleted)
+            if (it != streams_.end() && it->second.valid) {
+                return &it->second;
+            }
+            return nullptr;
         });
 }
 
@@ -621,6 +625,10 @@ void ServerConnection::on_h2_stream_close(int32_t h2_stream_id) {
 void ServerConnection::close_stream_only(int32_t h2_stream_id) {
     auto it = streams_.find(h2_stream_id);
     if (it == streams_.end()) return;
+
+    // Mark as invalid first (in case nghttp2 callbacks are in progress)
+    it->second.valid = false;
+
     const proxy::socket_t sock = it->second.sock;
     server_upstream::close(it->second);
     streams_.erase(it);
@@ -630,6 +638,11 @@ void ServerConnection::close_stream_only(int32_t h2_stream_id) {
 }
 
 void ServerConnection::close_all_upstreams() {
+    // Mark all streams as invalid first (in case nghttp2 callbacks are in progress)
+    for (auto& kv : streams_) {
+        kv.second.valid = false;
+    }
+
     // Collect sockets to unregister before clearing (avoid iterator invalidation)
     std::vector<proxy::socket_t> socks;
     for (auto& kv : streams_) {
