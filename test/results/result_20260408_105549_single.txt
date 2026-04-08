@@ -1,0 +1,40 @@
+Test: single
+Status: PASS
+Timestamp: Wed Apr  8 10:55:49 CST 2026
+
+Server log (last 20 lines):
+[info] [h2] on_header stream=7 name=[accept-language] value=[en-US,en;q=0.9] namelen=15 valuelen=14
+[info] [h2] on_header stream=7 name=[accept-encoding] value=[gzip, deflate, br] namelen=15 valuelen=17
+[info] [h2] on_header stream=7 name=[sec-fetch-dest] value=[image] namelen=14 valuelen=5
+[info] [h2] on_header stream=7 name=[sec-fetch-mode] value=[no-cors] namelen=14 valuelen=7
+[info] [h2] on_header stream=7 name=[sec-fetch-site] value=[same-origin] namelen=14 valuelen=11
+[info] [h2] HEADERS frame complete stream=7 cat=0
+[info] [h2] HEADERS complete: method=GET authority=127.0.0.1 headers_count=9
+[info] [h2] handle_connect stream=7
+[info] [h2] stream=7 method=[GET] authority=[127.0.0.1] headers_count=9
+[info] [h2] stream=7 GET request
+[info] [server] DNS event: 1 results
+[info] [server] delivering DNS result to stream=5 addrs=1
+[info] [upstream] stream=5 DNS resolved 153.3.238.127 to 1 addr(s), connecting...
+[info] [server] conn_id=1 stream=5 DNS resolved, socket=8 connected=no
+[info] [upstream] stream=5 TCP connected use_socks5=no
+[info] [server] conn_id=1 stream=5 upstream connected
+[info] [server] conn_id=1 read 533 bytes from client, total=533
+[info] [server] conn_id=1 read 150 bytes from client, total=150
+[info] [server] conn_id=1 read 192 bytes from client, total=192
+[info] [server] conn_id=1 read 58 bytes from client, total=58
+
+Client log (last 20 lines):
+[info] [client] 正在连接 127.0.0.1:18443 ...
+[info] [server] OPENSSL_IS_BORINGSSL: 1
+[info] [client] submitting SETTINGS...
+[info] [client] nghttp2_submit_settings returned 0
+[info] [client] nghttp2_session_set_local_window_size returned 0
+[info] [client] flushing initial session data...
+[info] [client] initial flush complete
+[info] [client] HTTP/2 TLS 连接已建立到 127.0.0.1:18443
+[info] [client] 本地代理监听 :11080 (SOCKS5 + HTTP)
+[info] [client] 新建本地连接 target=2.16.184.197:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers
+[info] [client] 新建本地连接 target=153.3.238.127:443 atyp=ipv4 proto=socks5
+[info] [client] submitting H2 request with 2 headers

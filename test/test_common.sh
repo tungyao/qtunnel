@@ -68,6 +68,13 @@ start_server() {
     local port=${1:-18443}
     local log_file="$LOG_DIR/server.log"
 
+    # Ensure port is free before starting
+    debug "Waiting for port $port to be free..."
+    wait_for_port_free "$port" 5 || {
+        error "Port $port still in use, cannot start server"
+        return 1
+    }
+
     info "Starting server on port $port..."
     "$BUILD_DIR/qtunnel_server" \
         --listen "$port" \
@@ -77,7 +84,7 @@ start_server() {
         > "$log_file" 2>&1 &
 
     local server_pid=$!
-    sleep 1
+    sleep 2
 
     if ! ps -p "$server_pid" > /dev/null 2>&1; then
         error "Server failed to start"
@@ -95,6 +102,13 @@ start_client() {
     local listen_port=${2:-11080}
     local log_file="$LOG_DIR/client.log"
 
+    # Ensure port is free before starting
+    debug "Waiting for port $listen_port to be free..."
+    wait_for_port_free "$listen_port" 5 || {
+        error "Port $listen_port still in use, cannot start client"
+        return 1
+    }
+
     info "Starting client on port $listen_port..."
     "$BUILD_DIR/qtunnel_client" "$server_addr" \
         --listen "$listen_port" \
@@ -102,7 +116,7 @@ start_client() {
         > "$log_file" 2>&1 &
 
     local client_pid=$!
-    sleep 1
+    sleep 2
 
     if ! ps -p "$client_pid" > /dev/null 2>&1; then
         error "Client failed to start"
@@ -117,12 +131,56 @@ start_client() {
 # Cleanup all processes
 cleanup_all() {
     local pids=("$@")
+
+    # First pass: graceful kill (SIGTERM)
     for pid in "${pids[@]}"; do
-        if [ -n "$pid" ] && kill "$pid" 2>/dev/null; then
-            debug "Killed process $pid"
+        if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
+            debug "Gracefully killing process $pid"
+            kill "$pid" 2>/dev/null || true
         fi
     done
+
+    # Wait for processes to terminate
+    sleep 2
+
+    # Second pass: force kill any remaining processes (SIGKILL)
+    for pid in "${pids[@]}"; do
+        if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
+            debug "Force killing process $pid"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for port to be released
+    sleep 2
+}
+
+# Wait for a port to be free
+wait_for_port_free() {
+    local port=$1
+    local max_wait=${2:-5}
+    local waited=0
+
+    while [ $waited -lt $max_wait ]; do
+        if ! netstat -tuln 2>/dev/null | grep -q ":$port " && \
+           ! ss -tuln 2>/dev/null | grep -q ":$port " && \
+           ! lsof -i ":$port" 2>/dev/null | grep -q LISTEN; then
+            debug "Port $port is now free"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    warn "Port $port still in use after ${max_wait}s, forcing..."
+    # Force kill any processes using the port
+    local pids=$(lsof -t -i ":$port" 2>/dev/null || echo "")
+    for pid in $pids; do
+        debug "Force killing process on port $port (PID: $pid)"
+        kill -9 "$pid" 2>/dev/null || true
+    done
     sleep 1
+    return 0
 }
 
 # Health check using curl

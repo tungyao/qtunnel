@@ -25,6 +25,10 @@ cleanup_handler() {
     if [ -n "$SERVER_PID" ] || [ -n "$CLIENT_PID" ]; then
         debug "Cleaning up: SERVER_PID=$SERVER_PID, CLIENT_PID=$CLIENT_PID"
         cleanup_all "$SERVER_PID" "$CLIENT_PID"
+
+        # Ensure ports are released
+        wait_for_port_free "$SERVER_PORT" 3
+        wait_for_port_free "$SOCKS_PORT" 3
     fi
 }
 trap cleanup_handler EXIT
@@ -48,6 +52,7 @@ test_mode_single() {
     cleanup_handler
     SERVER_PID=""
     CLIENT_PID=""
+    sleep 1  # Ensure ports are fully released
     return 0
 }
 
@@ -69,6 +74,7 @@ test_mode_concurrent() {
     cleanup_handler
     SERVER_PID=""
     CLIENT_PID=""
+    sleep 1  # Ensure ports are fully released
     return 0
 }
 
@@ -90,6 +96,7 @@ test_mode_large_file() {
     cleanup_handler
     SERVER_PID=""
     CLIENT_PID=""
+    sleep 1  # Ensure ports are fully released
     return 0
 }
 
