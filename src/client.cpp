@@ -1233,10 +1233,35 @@ void ClientRuntime::accept_and_pump_loop() {
                 continue;
             }
 
-            // Fast O(1) lookup using socket_to_stream index
-            auto it = socket_to_stream.find(ev.sock);
-            if (it == socket_to_stream.end()) continue;
-            std::shared_ptr<LocalStream> target = it->second;
+            // Find target stream - verify index lookup and check stream state
+            std::shared_ptr<LocalStream> target;
+            {
+                // First try fast lookup
+                auto it = socket_to_stream.find(ev.sock);
+                if (it != socket_to_stream.end()) {
+                    target = it->second;
+                    // Verify stream is still valid (not closed/modified)
+                    std::lock_guard<std::mutex> sl(target->mutex);
+                    if (target->state != LocalStream::State::Open ||
+                        target->sock != ev.sock) {
+                        target = nullptr;  // Stream state changed, discard
+                    }
+                }
+            }
+
+            // Fallback to linear search if fast lookup failed or returned invalid stream
+            if (!target) {
+                for (const auto& stream : snapshot) {
+                    std::lock_guard<std::mutex> sl(stream->mutex);
+                    if (stream->state == LocalStream::State::Open &&
+                        stream->sock == ev.sock) {
+                        target = stream;
+                        break;
+                    }
+                }
+            }
+
+            if (!target) continue;
 
             if ((ev.error || ev.hangup) && !ev.writable) {
                 close_local_stream(target);
@@ -1338,18 +1363,23 @@ void ClientRuntime::accept_one() {
 
 void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream) {
     socket_t sock = kInvalidSocket;
-    bool buffer_full = false;
+    int32_t h2_stream_id = -1;
+
+    // Check stream state and get socket (hold lock briefly)
     {
         std::lock_guard<std::mutex> sl(stream->mutex);
-        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) return;
-        // Check backpressure: don't read if buffer is full
-        if (stream->pending_uplink.size() >= kMaxUplinkBuffer) {
-            buffer_full = true;
+        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
             return;
         }
+        // Check backpressure: don't read if buffer is full
+        if (stream->pending_uplink.size() >= kMaxUplinkBuffer) {
+            return;  // Buffer full, stop reading
+        }
         sock = stream->sock;
+        h2_stream_id = stream->h2_stream_id;
     }
 
+    // Perform recv() without holding lock
     std::array<std::uint8_t, kTunnelIoChunkSize> buf{};
 #ifdef _WIN32
     const int ret = ::recv(sock, reinterpret_cast<char*>(buf.data()),
@@ -1357,18 +1387,36 @@ void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream
 #else
     const int ret = static_cast<int>(::recv(sock, buf.data(), buf.size(), 0));
 #endif
-    if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) return;
-    if (ret <= 0) {
-        close_local_stream(stream);
+
+    // Check if recv failed or socket would block
+    if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) {
         return;
     }
 
-    PROXY_LOG(Debug, "[client] stream=" << stream->h2_stream_id
+    // Handle recv errors and EOF
+    if (ret <= 0) {
+        // Verify stream still exists and hasn't been closed yet
+        std::lock_guard<std::mutex> sl(stream->mutex);
+        if (stream->state == LocalStream::State::Open && stream->sock == sock) {
+            close_local_stream(stream);
+        }
+        return;
+    }
+
+    PROXY_LOG(Debug, "[client] stream=" << h2_stream_id
               << " 读取本地上行数据 bytes=" << ret);
 
+    // Buffer the data (hold lock only briefly)
     bool need_resume = false;
     {
         std::lock_guard<std::mutex> sl(stream->mutex);
+        // Verify stream still valid before buffering
+        if (stream->state != LocalStream::State::Open ||
+            stream->sock != sock ||
+            h2_stream_id != stream->h2_stream_id) {
+            return;  // Stream state changed, discard data
+        }
+
         stream->pending_uplink.insert(stream->pending_uplink.end(),
                                       buf.data(), buf.data() + ret);
         need_resume = stream->uplink_deferred;
@@ -1377,7 +1425,7 @@ void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream
     if (need_resume) {
         {
             std::lock_guard<std::mutex> lock(resume_mutex_);
-            pending_resume_.insert(stream->h2_stream_id);
+            pending_resume_.insert(h2_stream_id);
         }
         signal_notifier(io_notifier_, "client", "uplink-data");
     }
