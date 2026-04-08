@@ -1095,7 +1095,7 @@ bool ClientRuntime::flush_session() {
         PROXY_LOG(Debug, "[client] flush_session: sending " << len << " bytes");
         total_sent += len;
         if (!tls_.write_all(data, static_cast<std::size_t>(len))) {
-            PROXY_LOG(Error, "[client] TLS write_all failed");
+            PROXY_LOG(Error, "[client] TLS write_all failed: " << tls_.last_error());
             return false;
         }
     }

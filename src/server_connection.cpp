@@ -150,12 +150,23 @@ void ServerConnection::on_client_event(bool readable, bool writable) {
 
 void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bool writable) {
     if (closed()) return;
+    PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                  << " on_upstream_event stream=" << h2_stream_id
+                  << " readable=" << readable << " writable=" << writable);
     auto it = streams_.find(h2_stream_id);
-    if (it == streams_.end()) return;
+    if (it == streams_.end()) {
+        PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                      << " stream=" << h2_stream_id << " NOT FOUND");
+        return;
+    }
     auto& peer = it->second;
 
     // Skip if peer has been marked as invalid (being deleted)
-    if (!peer.valid) return;
+    if (!peer.valid) {
+        PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                      << " stream=" << h2_stream_id << " invalid");
+        return;
+    }
 
     if (peer.state == server_upstream::State::Connecting && (readable || writable)) {
         bool send_open_ok = false;
@@ -172,7 +183,11 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
             PROXY_LOG(Info, "[server] conn_id=" << conn_id_
                           << " stream=" << h2_stream_id << " upstream connected");
             h2_driver_.notify_upstream_connected(h2_stream_id);
+            PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                          << " stream=" << h2_stream_id << " calling drive_session_send");
             drive_session_send();
+            PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                          << " stream=" << h2_stream_id << " returned from drive_session_send, closed=" << closed());
             if (closed()) return;
             if (streams_.count(h2_stream_id)) {
                 auto& p = streams_.at(h2_stream_id);
@@ -467,6 +482,11 @@ void ServerConnection::read_h2_frames() {
         const auto status = tls_.read_nonblocking(buf.data(), buf.size(), nread);
         tls_need_read_  = (status == proxy::TlsSocket::IoStatus::WantRead);
         tls_need_write_ = (status == proxy::TlsSocket::IoStatus::WantWrite);
+
+        PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                      << " tls_.read_nonblocking returned status=" << static_cast<int>(status)
+                      << " nread=" << nread);
+
         if (status == proxy::TlsSocket::IoStatus::Ok) {
             consumed_total += nread;
             PROXY_LOG(Info, "[server] conn_id=" << conn_id_
@@ -495,9 +515,15 @@ void ServerConnection::read_h2_frames() {
             PROXY_LOG(Debug, "[server] conn_id=" << conn_id_ << " TLS wants write");
             return;
         }
+        if (status == proxy::TlsSocket::IoStatus::Closed) {
+            PROXY_LOG(Info, "[server] conn_id=" << conn_id_ << " TLS connection closed by peer");
+            close_connection();
+            return;
+        }
+        // Status::Error
         PROXY_LOG(Error, "[server] conn_id=" << conn_id_
                       << " TLS read error (status=" << static_cast<int>(status) << ")"
-                      << " err=" << tls_.last_error()
+                      << " last_error='" << tls_.last_error() << "'"
                       << " streams=" << streams_.size()
                       << " nread=" << nread
                       << " consumed_total=" << consumed_total);
