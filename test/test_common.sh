@@ -191,7 +191,7 @@ health_check() {
 
     info "Performing health check..."
     while [ $retry -lt "$max_retries" ]; do
-        if curl -s --socks5 "$proxy_addr" \
+        if curl -s -x "http://$proxy_addr" \
             "https://www.apple.com/library/test/success.html" \
             -o /dev/null -w "%{http_code}" 2>/dev/null | \
             grep -q "200\|301\|302"; then
