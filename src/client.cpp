@@ -2348,8 +2348,16 @@ std::shared_ptr<LocalStream> ClientRuntime::try_parse_next_request(
 
     // Security: if socket is already in CONNECT mode, reject new requests
     if (is_connect && conn->is_connect_mode) {
-        PROXY_LOG(Warn, "[client] try_parse_next_request: rejecting CONNECT on already-CONNECT socket");
+        PROXY_LOG(Warn, "[client] try_parse_next_request: rejecting CONNECT on already-CONNECT socket"
+                      << " (target=" << socks_req.host << ":" << socks_req.port << ")");
         return nullptr;
+    }
+
+    // Also log when we're parsing a CONNECT while socket is NOT yet in CONNECT mode
+    if (is_connect && !conn->stream_queue.empty()) {
+        PROXY_LOG(Warn, "[client] try_parse_next_request: CONNECT while previous stream still pending"
+                      << " (queue_size=" << conn->stream_queue.size()
+                      << " is_connect_mode=" << conn->is_connect_mode << ")");
     }
 
     if (is_connect) {
