@@ -154,6 +154,9 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
     if (it == streams_.end()) return;
     auto& peer = it->second;
 
+    // Skip if peer has been marked as invalid (being deleted)
+    if (!peer.valid) return;
+
     if (peer.state == server_upstream::State::Connecting && (readable || writable)) {
         bool send_open_ok = false;
         std::string err;
@@ -173,6 +176,9 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
             if (closed()) return;
             if (streams_.count(h2_stream_id)) {
                 auto& p = streams_.at(h2_stream_id);
+                // Check if stream is still valid (may have been marked invalid during drive_session_send)
+                if (!p.valid) return;
+
                 if (p.state == server_upstream::State::Open && !p.pending_uplink.empty()) {
                     const std::size_t offset_before = p.pending_uplink_offset;
                     if (!server_upstream::process_write(p)) {
@@ -193,7 +199,11 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
             return;
         }
         if (streams_.count(h2_stream_id)) {
-            rearm_upstream(h2_stream_id, streams_.at(h2_stream_id));
+            auto& p = streams_.at(h2_stream_id);
+            // Skip if stream has been marked invalid
+            if (p.valid) {
+                rearm_upstream(h2_stream_id, p);
+            }
         }
         return;
     }
@@ -265,6 +275,9 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
             // Flush any buffered uplink data now that upstream is Open
             if (streams_.count(h2_stream_id)) {
                 auto& p = streams_.at(h2_stream_id);
+                // Check if stream is still valid (may have been marked invalid during drive_session_send)
+                if (!p.valid) return;
+
                 if (!p.pending_uplink.empty()) {
                     const std::size_t offset_before = p.pending_uplink_offset;
                     if (server_upstream::process_write(p)) {
@@ -315,7 +328,9 @@ void ServerConnection::rearm_all_upstreams() {
 
 void ServerConnection::rearm_upstream(int32_t /*h2_stream_id*/,
                                        const server_upstream::Peer& peer) {
-    if (peer.sock == proxy::kInvalidSocket) return;
+    // Skip invalid or closed peers
+    if (!peer.valid || peer.sock == proxy::kInvalidSocket) return;
+
     const EventFlags flags = server_upstream::interest(peer);
     proxy::Reactor& reactor = hooks_.get_reactor();
     std::string err;
