@@ -318,12 +318,20 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
 }
 
 void ServerConnection::drive_session_send() {
-    if (closed() || mode_ != Mode::Http2) return;
+    PROXY_LOG(Debug, "[server] conn_id=" << conn_id_ << " drive_session_send called");
+    if (closed() || mode_ != Mode::Http2) {
+        PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                      << " returning early: closed=" << closed() << " mode=" << static_cast<int>(mode_));
+        return;
+    }
     if (!h2_driver_.session_send()) {
+        PROXY_LOG(Error, "[server] conn_id=" << conn_id_ << " h2_driver_.session_send() returned false");
         close_connection();
         return;
     }
+    PROXY_LOG(Debug, "[server] conn_id=" << conn_id_ << " h2_driver_.session_send() succeeded");
     if (h2_driver_.shutdown_requested()) {
+        PROXY_LOG(Info, "[server] conn_id=" << conn_id_ << " h2_driver shutdown requested");
         close_connection();
         return;
     }
@@ -333,6 +341,7 @@ void ServerConnection::drive_session_send() {
     proxy::Reactor& reactor = hooks_.get_reactor();
     std::string err;
     reactor.arm(tls_.raw_socket(), want, err);
+    PROXY_LOG(Debug, "[server] conn_id=" << conn_id_ << " drive_session_send completed");
 }
 
 void ServerConnection::rearm_all_upstreams() {
