@@ -16,8 +16,18 @@ SERVER_PORT=18443
 SOCKS_PORT=11080
 TEST_MODE="${1:-all}"  # single, concurrent, large-file, all
 
+# Global process IDs (must be global for trap to work)
+SERVER_PID=""
+CLIENT_PID=""
+
 # Cleanup on exit
-trap 'cleanup_all "$SERVER_PID" "$CLIENT_PID"' EXIT
+cleanup_handler() {
+    if [ -n "$SERVER_PID" ] || [ -n "$CLIENT_PID" ]; then
+        debug "Cleaning up: SERVER_PID=$SERVER_PID, CLIENT_PID=$CLIENT_PID"
+        cleanup_all "$SERVER_PID" "$CLIENT_PID"
+    fi
+}
+trap cleanup_handler EXIT
 
 # Functions for each test mode
 test_mode_single() {
@@ -28,11 +38,16 @@ test_mode_single() {
     SERVER_PID=$(start_server "$SERVER_PORT") || return 1
     CLIENT_PID=$(start_client "127.0.0.1:$SERVER_PORT" "$SOCKS_PORT") || return 1
 
-    health_check "127.0.0.1:$SOCKS_PORT" 5 || return 1
-    test_single_request "127.0.0.1:$SOCKS_PORT" "https://www.baidu.com" || return 1
+    health_check "127.0.0.1:$SOCKS_PORT" 5 || { cleanup_handler; return 1; }
+    test_single_request "127.0.0.1:$SOCKS_PORT" "https://www.baidu.com" || { cleanup_handler; return 1; }
 
     local result_file=$(save_results "single" "PASS")
     info "Results saved to: $result_file"
+
+    # Cleanup after test completes
+    cleanup_handler
+    SERVER_PID=""
+    CLIENT_PID=""
     return 0
 }
 
@@ -44,11 +59,16 @@ test_mode_concurrent() {
     SERVER_PID=$(start_server "$SERVER_PORT") || return 1
     CLIENT_PID=$(start_client "127.0.0.1:$SERVER_PORT" "$SOCKS_PORT") || return 1
 
-    health_check "127.0.0.1:$SOCKS_PORT" 5 || return 1
-    test_concurrent_requests "127.0.0.1:$SOCKS_PORT" 20 "https://www.baidu.com" || return 1
+    health_check "127.0.0.1:$SOCKS_PORT" 5 || { cleanup_handler; return 1; }
+    test_concurrent_requests "127.0.0.1:$SOCKS_PORT" 20 "https://www.baidu.com" || { cleanup_handler; return 1; }
 
     local result_file=$(save_results "concurrent" "PASS")
     info "Results saved to: $result_file"
+
+    # Cleanup after test completes
+    cleanup_handler
+    SERVER_PID=""
+    CLIENT_PID=""
     return 0
 }
 
@@ -60,11 +80,16 @@ test_mode_large_file() {
     SERVER_PID=$(start_server "$SERVER_PORT") || return 1
     CLIENT_PID=$(start_client "127.0.0.1:$SERVER_PORT" "$SOCKS_PORT") || return 1
 
-    health_check "127.0.0.1:$SOCKS_PORT" 5 || return 1
-    test_large_file_concurrent "127.0.0.1:$SOCKS_PORT" 10000000 20 || return 1
+    health_check "127.0.0.1:$SOCKS_PORT" 5 || { cleanup_handler; return 1; }
+    test_large_file_concurrent "127.0.0.1:$SOCKS_PORT" 10000000 20 || { cleanup_handler; return 1; }
 
     local result_file=$(save_results "large-file-concurrent" "PASS")
     info "Results saved to: $result_file"
+
+    # Cleanup after test completes
+    cleanup_handler
+    SERVER_PID=""
+    CLIENT_PID=""
     return 0
 }
 
@@ -80,11 +105,9 @@ test_mode_all() {
         error "✗ Single request test FAILED"
         return 1
     fi
-    echo ""
-
-    # Clean up before next test
-    cleanup_all "$SERVER_PID" "$CLIENT_PID"
+    # cleanup is handled by test_mode_single
     sleep 1
+    echo ""
 
     # Test 2: Concurrent requests
     info "Test 2/3: Concurrent Requests"
@@ -94,11 +117,9 @@ test_mode_all() {
         error "✗ Concurrent test FAILED"
         return 1
     fi
-    echo ""
-
-    # Clean up before next test
-    cleanup_all "$SERVER_PID" "$CLIENT_PID"
+    # cleanup is handled by test_mode_concurrent
     sleep 1
+    echo ""
 
     # Test 3: Large file + concurrent
     info "Test 3/3: Large File + Concurrent"
@@ -108,6 +129,7 @@ test_mode_all() {
         error "✗ Large file + concurrent test FAILED"
         return 1
     fi
+    # cleanup is handled by test_mode_large_file
 
     info "====== ALL TESTS PASSED ======"
     return 0
