@@ -989,6 +989,15 @@ void ClientRuntime::process_pending_tunnels() {
             std::lock_guard<std::mutex> lock(streams_mutex_);
             streams_[sid] = stream;
         }
+
+        // For HTTP path: now add the stream to the connection's queue
+        // (after h2_stream_id has been assigned)
+        if (is_http_path && pt.conn) {
+            std::lock_guard<std::mutex> lock(pt.conn->mutex);
+            pt.conn->stream_queue.push_back(stream);
+            PROXY_LOG(Debug, "[client] added stream " << sid << " to connection queue");
+        }
+
         PROXY_LOG(Info, "[client] H2 CONNECT stream=" << sid << " target=" << authority
                       << " SUBMITTED (will be flushed in next flush_session call)");
     }
@@ -1214,20 +1223,25 @@ nghttp2_ssize ClientRuntime::uplink_read_callback(nghttp2_session* /*session*/,
 
     // Wait until stream is Open (200 received) before sending data
     if (stream->state == LocalStream::State::Pending) {
+        PROXY_LOG(Debug, "[client] uplink_read_callback stream=" << stream_id << " Pending -> deferred");
         stream->uplink_deferred = true;
         return NGHTTP2_ERR_DEFERRED;
     }
 
     if (stream->pending_uplink.empty()) {
         if (stream->uplink_eof) {
+            PROXY_LOG(Debug, "[client] uplink_read_callback stream=" << stream_id << " EOF");
             *data_flags |= NGHTTP2_DATA_FLAG_EOF;
             return 0;
         }
+        PROXY_LOG(Debug, "[client] uplink_read_callback stream=" << stream_id << " no data -> deferred");
         stream->uplink_deferred = true;
         return NGHTTP2_ERR_DEFERRED;
     }
 
     const std::size_t n = std::min(length, stream->pending_uplink.size());
+    PROXY_LOG(Info, "[client] uplink_read_callback stream=" << stream_id << " sending " << n << " bytes"
+                  << " remaining=" << (stream->pending_uplink.size() - n));
     std::memcpy(buf, stream->pending_uplink.data(), n);
     stream->pending_uplink.erase(stream->pending_uplink.begin(),
                                   stream->pending_uplink.begin() + static_cast<std::ptrdiff_t>(n));
@@ -1521,12 +1535,17 @@ void ClientRuntime::accept_and_pump_loop() {
             auto conn_it = connections_.find(ev.sock);
             if (conn_it != connections_.end()) {
                 auto& conn = conn_it->second;
+                PROXY_LOG(Debug, "[client] accept_and_pump_loop: HTTP connection event"
+                              << " readable=" << ev.readable << " writable=" << ev.writable
+                              << " error=" << ev.error << " hangup=" << ev.hangup);
                 if (ev.error || ev.hangup) {
+                    PROXY_LOG(Info, "[client] accept_and_pump_loop: closing connection due to error/hangup");
                     close_local_connection(conn);
                     continue;
                 }
                 if (ev.writable) {
                     std::string err;
+                    PROXY_LOG(Debug, "[client] accept_and_pump_loop: flushing downlink data");
                     flush_local_connection(conn, err);
                     if (!err.empty()) {
                         PROXY_LOG(Debug, "[client] flush error: " << err);
@@ -1534,6 +1553,7 @@ void ClientRuntime::accept_and_pump_loop() {
                     }
                 }
                 if (ev.readable) {
+                    PROXY_LOG(Debug, "[client] accept_and_pump_loop: calling pump_local_connection");
                     pump_local_connection(conn);
                 }
                 continue;
@@ -2028,14 +2048,19 @@ void ClientRuntime::pump_local_connection(const std::shared_ptr<LocalConnection>
         if (ret > 0) {
             // Buffer the received data
             std::lock_guard<std::mutex> lk(conn->mutex);
+            PROXY_LOG(Debug, "[client] pump_local_connection: received " << ret << " bytes from socket"
+                          << " is_connect_mode=" << conn->is_connect_mode
+                          << " stream_queue_size=" << conn->stream_queue.size());
             conn->recv_buf.insert(conn->recv_buf.end(), buf.data(), buf.data() + ret);
         } else if (ret == 0) {
             // EOF from socket
             std::lock_guard<std::mutex> lk(conn->mutex);
+            PROXY_LOG(Info, "[client] pump_local_connection: socket EOF");
             conn->recv_eof = true;
         } else if (ret < 0 && !is_socket_would_block(proxy::last_socket_error_code())) {
             // Real error (not EAGAIN)
             std::lock_guard<std::mutex> lk(conn->mutex);
+            PROXY_LOG(Error, "[client] pump_local_connection: socket error");
             conn->recv_eof = true;
         }
         // If EAGAIN, just continue with processing buffered data
@@ -2077,16 +2102,25 @@ void ClientRuntime::pump_local_connection(const std::shared_ptr<LocalConnection>
                 auto stream = conn->stream_queue.front();
                 {
                     std::lock_guard<std::mutex> sl(stream->mutex);
+                    const std::size_t data_size = conn->recv_buf.size();
+                    PROXY_LOG(Info, "[client] CONNECT mode: forwarding " << data_size << " bytes to stream"
+                                  << " h2_stream_id=" << stream->h2_stream_id
+                                  << " state=" << static_cast<int>(stream->state)
+                                  << " uplink_deferred=" << stream->uplink_deferred);
                     stream->pending_uplink.insert(stream->pending_uplink.end(),
                                                   conn->recv_buf.begin(), conn->recv_buf.end());
                     bool should_resume = stream->uplink_deferred;
                     conn->recv_buf.clear();
                     if (should_resume) {
+                        PROXY_LOG(Debug, "[client] CONNECT mode: resuming deferred uplink for stream=" << stream->h2_stream_id);
                         std::lock_guard<std::mutex> rl(resume_mutex_);
                         pending_resume_.insert(stream->h2_stream_id);
                     }
                 }
                 signal_notifier(io_notifier_, "client", "uplink-data");
+            } else {
+                PROXY_LOG(Debug, "[client] CONNECT mode: cannot process - queue_empty=" << conn->stream_queue.empty()
+                              << " buf_empty=" << conn->recv_buf.empty());
             }
             break;
         }
@@ -2373,8 +2407,9 @@ std::shared_ptr<LocalStream> ClientRuntime::try_parse_next_request(
         pending_tunnels_.push_back(pt);
     }
 
-    // Add stream to queue
-    conn->stream_queue.push_back(stream);
+    // NOTE: Stream will be added to connection queue by process_pending_tunnels
+    // after h2_stream_id is assigned. This avoids race condition where pump thread
+    // tries to forward data before stream is submitted to nghttp2.
 
     // Remove request from recv_buf and set up body_remaining
     conn->recv_buf.erase(conn->recv_buf.begin(), conn->recv_buf.begin() + request_len);
