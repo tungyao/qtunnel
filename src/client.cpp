@@ -44,6 +44,7 @@ constexpr std::size_t kTunnelIoChunkSize   = 256 * 1024;
 constexpr std::int32_t kHttp2WindowSize    = 16 * 1024 * 1024;
 constexpr std::uint32_t kHttp2MaxFrameSize = 1024 * 1024;
 constexpr std::size_t kMaxBufferedDownlinkBytes = 32 * 1024 * 1024;
+constexpr std::size_t kMaxUplinkBuffer      = 16 * 1024 * 1024;  // Backpressure limit
 
 using proxy::close_socket;
 using proxy::EventDispatcher;
@@ -1164,6 +1165,7 @@ void ClientRuntime::accept_and_pump_loop() {
         return;
     }
     std::map<socket_t, std::pair<bool, bool>> watched;
+    std::map<socket_t, std::shared_ptr<LocalStream>> socket_to_stream;  // Fast lookup index
 
     while (running_) {
         std::map<socket_t, std::pair<bool, bool>> desired;
@@ -1174,6 +1176,16 @@ void ClientRuntime::accept_and_pump_loop() {
         {
             std::lock_guard<std::mutex> lock(streams_mutex_);
             for (const auto& kv : streams_) snapshot.push_back(kv.second);
+        }
+
+        // Rebuild fast lookup index for this iteration
+        socket_to_stream.clear();
+        for (const auto& stream : snapshot) {
+            std::lock_guard<std::mutex> sl(stream->mutex);
+            if (stream->state == LocalStream::State::Open &&
+                stream->sock != kInvalidSocket) {
+                socket_to_stream[stream->sock] = stream;
+            }
         }
 
         for (const auto& stream : snapshot) {
@@ -1221,16 +1233,10 @@ void ClientRuntime::accept_and_pump_loop() {
                 continue;
             }
 
-            std::shared_ptr<LocalStream> target;
-            for (const auto& stream : snapshot) {
-                std::lock_guard<std::mutex> sl(stream->mutex);
-                if (stream->state == LocalStream::State::Open &&
-                    stream->sock == ev.sock) {
-                    target = stream;
-                    break;
-                }
-            }
-            if (!target) continue;
+            // Fast O(1) lookup using socket_to_stream index
+            auto it = socket_to_stream.find(ev.sock);
+            if (it == socket_to_stream.end()) continue;
+            std::shared_ptr<LocalStream> target = it->second;
 
             if ((ev.error || ev.hangup) && !ev.writable) {
                 close_local_stream(target);
@@ -1332,9 +1338,15 @@ void ClientRuntime::accept_one() {
 
 void ClientRuntime::pump_local_socket(const std::shared_ptr<LocalStream>& stream) {
     socket_t sock = kInvalidSocket;
+    bool buffer_full = false;
     {
         std::lock_guard<std::mutex> sl(stream->mutex);
         if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) return;
+        // Check backpressure: don't read if buffer is full
+        if (stream->pending_uplink.size() >= kMaxUplinkBuffer) {
+            buffer_full = true;
+            return;
+        }
         sock = stream->sock;
     }
 
@@ -1399,10 +1411,13 @@ bool ClientRuntime::flush_local_socket(const std::shared_ptr<LocalStream>& strea
         stream->pending_downlink.clear();
         stream->pending_downlink_offset = 0;
     } else if (stream->pending_downlink_offset >= kTunnelIoChunkSize) {
-        stream->pending_downlink.erase(
-            stream->pending_downlink.begin(),
-            stream->pending_downlink.begin()
-                + static_cast<std::ptrdiff_t>(stream->pending_downlink_offset));
+        // Optimized cleanup: move remaining data to front instead of erasing
+        const std::size_t remaining = stream->pending_downlink.size()
+                                    - stream->pending_downlink_offset;
+        std::memmove(stream->pending_downlink.data(),
+                     stream->pending_downlink.data() + stream->pending_downlink_offset,
+                     remaining);
+        stream->pending_downlink.resize(remaining);
         stream->pending_downlink_offset = 0;
     }
     return true;
