@@ -263,8 +263,12 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
     }
 
     if (readable && !peer.upstream_eof) {
+        PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                      << " stream=" << h2_stream_id << " upstream readable, state=" << static_cast<int>(peer.state));
         const server_upstream::State state_before = peer.state;
         if (!server_upstream::process_read(peer)) {
+            PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                          << " stream=" << h2_stream_id << " process_read failed");
             if (peer.state == server_upstream::State::Open) {
                 PROXY_LOG(Info, "[server] conn_id=" << conn_id_
                               << " stream=" << h2_stream_id << " upstream EOF");
@@ -280,7 +284,12 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
                 drive_session_send();
                 return;
             }
-        } else if (state_before != server_upstream::State::Open &&
+        } else {
+            PROXY_LOG(Debug, "[server] conn_id=" << conn_id_
+                          << " stream=" << h2_stream_id << " process_read succeeded, pending_downlink="
+                          << peer.pending_downlink.total_bytes);
+        }
+        if (state_before != server_upstream::State::Open &&
                    peer.state == server_upstream::State::Open) {
             PROXY_LOG(Info, "[server] conn_id=" << conn_id_
                           << " stream=" << h2_stream_id << " SOCKS5 handshake completed via read");
@@ -305,7 +314,9 @@ void ServerConnection::on_upstream_event(int32_t h2_stream_id, bool readable, bo
                 }
             }
         } else if (peer.state == server_upstream::State::Open &&
-                   !peer.pending_downlink.empty()) {
+                   peer.pending_downlink.total_bytes > 0) {
+            PROXY_LOG(Info, "[server] conn_id=" << conn_id_
+                          << " stream=" << h2_stream_id << " notifying h2_driver of upstream data, pending=" << peer.pending_downlink.total_bytes);
             h2_driver_.notify_upstream_data(h2_stream_id);
             drive_session_send();
             if (closed()) return;
