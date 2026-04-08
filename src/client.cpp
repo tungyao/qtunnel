@@ -828,11 +828,13 @@ void ClientRuntime::io_loop() {
 
         std::vector<SocketEvent> events;
         // Calculate wait timeout based on next decoy request time
+        // But use a short timeout (100ms) to ensure we process pending tunnels frequently
         auto ms_until_decoy = std::chrono::duration_cast<std::chrono::milliseconds>(
             next_decoy_time_ - std::chrono::steady_clock::now()).count();
-        int wait_ms = (ms_until_decoy > 0 && ms_until_decoy < 60000)
-                      ? static_cast<int>(ms_until_decoy)
-                      : 60000;
+        int wait_ms = 100;  // Short timeout to process pending tunnels quickly
+        if (ms_until_decoy > 0 && ms_until_decoy < 100) {
+            wait_ms = static_cast<int>(ms_until_decoy);
+        }
         const int ready = dispatcher.wait(events, wait_ms, de);
         if (ready < 0) {
             io_error_ = de;
