@@ -6,6 +6,9 @@
 #include "server_connection.h"
 #include "server_shared.h"
 
+// Tunnel handler (defined in tunnel_connection.cpp)
+extern void spawn_tunnel_handler(proxy::socket_t, const char*, const char*);
+
 #include <iostream>
 #include <map>
 #include <memory>
@@ -276,27 +279,8 @@ private:
             std::uint64_t conn_id = ++g_connection_id;
             PROXY_LOG(Info, "[server] client connected conn_id=" << conn_id << " from=" << client_addr);
 
-            std::string err;
-            if (!set_socket_nonblocking(client, true, err)) {
-                PROXY_LOG(Error, "[server] set client nonblocking failed: " << err);
-                close_socket(client);
-                continue;
-            }
-
-            auto connection = std::make_unique<ServerConnection>(client, config_, make_hooks(), conn_id, client_addr);
-            if (!connection->start()) {
-                PROXY_LOG(Error, "[server] failed to start accepted connection conn_id=" << conn_id);
-                continue;
-            }
-
-            socket_t fd = connection->client_fd();
-            fd_owners_[fd] = FdOwner{FdOwner::Kind::Client, connection.get(), 0};
-            if (!reactor_.arm(fd, EventFlags::Readable | EventFlags::Writable, err)) {
-                PROXY_LOG(Error, "[server] reactor arm client failed: " << err);
-                continue;
-            }
-            connections_[fd] = std::move(connection);
-            PROXY_LOG(Info, "[server] client registered fd=" << fd << " conn_id=" << conn_id);
+            // Spawn tunnel handler thread instead of H2 connection
+            spawn_tunnel_handler(client, config_.cert_file.c_str(), config_.key_file.c_str());
         }
     }
 

@@ -63,6 +63,7 @@ add_custom_target(generate_homepage_header DEPENDS ${HOMEPAGE_HTML_HEADER})
 add_executable(qtunnel_server
     src/server.cpp
     src/server_connection.cpp
+    src/tunnel_connection.cpp
     src/http2_session_driver.cpp
     src/upstream_peer.cpp
     src/dns_resolver.cpp
