@@ -351,26 +351,9 @@ bool accept_local_proxy_request(socket_t sock, AcceptedProxyRequest& accepted,
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalStream: one per proxied TCP connection
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper struct for HTTP request parsing
-struct HttpRequestBoundary {
-    bool complete = false;
-    std::size_t header_len = 0;   // bytes of headers incl \r\n\r\n
-    std::size_t body_len = 0;     // Content-Length (0 = no body)
-    bool chunked = false;         // Transfer-Encoding: chunked
-    bool keep_alive = true;       // false if "Connection: close"
-    std::string method;
-    std::string target;
-    std::string remote_host;
-    uint16_t remote_port = 80;
-};
-
-// Forward declaration
-struct LocalConnection;
-
 struct LocalStream {
     int32_t h2_stream_id = -1;
-    socket_t sock = kInvalidSocket;  // For SOCKS5 path; nullptr for HTTP
-    std::shared_ptr<LocalConnection> conn;  // back-pointer to owning connection (HTTP only)
+    socket_t sock = kInvalidSocket;  // Owns the local TCP socket
 
     enum class State { Pending, Open, Closed } state = State::Pending;
 
@@ -393,37 +376,9 @@ struct LocalStream {
     int h2_status = 0;
 };
 
-// Owns a local TCP socket and manages a queue of H2 streams for HTTP pipelining
-struct LocalConnection {
-    socket_t sock = kInvalidSocket;
-    bool is_connect_mode = false;  // true after CONNECT tunnel established (opaque TLS)
-
-    std::mutex mutex;  // Guards all fields below
-
-    // Ordered queue of active streams (for HTTP/1.1 pipelining)
-    // Front = oldest (waiting to flush response to socket)
-    std::deque<std::shared_ptr<LocalStream>> stream_queue;
-
-    // Receive buffer: bytes from socket not yet dispatched to a stream
-    std::vector<uint8_t> recv_buf;
-    bool recv_eof = false;
-
-    // For Forward mode: the stream currently receiving uplink body bytes
-    std::shared_ptr<LocalStream> active_recv_stream;
-
-    // Remaining bytes of current request body to route to active_recv_stream
-    // 0 = at request boundary, ready to parse next request
-    std::size_t body_remaining = 0;
-
-    // true = chunked encoding or other pipeline-incompatible mode; route all further
-    // bytes to active_recv_stream as opaque data
-    bool pipeline_broken = false;
-};
-
 // Pending tunnel: accepted by pump thread, submitted as H2 CONNECT by io thread
 struct PendingTunnel {
-    socket_t sock = kInvalidSocket;  // For SOCKS5 path
-    std::shared_ptr<LocalConnection> conn;  // For HTTP path (nullable)
+    socket_t sock = kInvalidSocket;  // Local socket owned by stream
     Socks5Request target;
     LocalProxyProtocol protocol;
     std::vector<std::uint8_t> initial_payload;
@@ -464,18 +419,10 @@ private:
 
     void accept_and_pump_loop();
     void accept_one();
-    void retry_pending_handshakes();  // Retry incomplete handshakes in pump loop (SOCKS5 only)
-    void pump_local_socket(const std::shared_ptr<LocalStream>& stream);  // DEPRECATED, use pump_local_connection
+    void retry_pending_handshakes();
+    void pump_local_socket(const std::shared_ptr<LocalStream>& stream);
     bool flush_local_socket(const std::shared_ptr<LocalStream>& stream, std::string& error);
-    // Close local socket and signal uplink EOF so H2 sends END_STREAM
     void close_local_stream(const std::shared_ptr<LocalStream>& stream);
-
-    // NEW: Per-request H2 tunnel functions
-    void pump_local_connection(const std::shared_ptr<LocalConnection>& conn);
-    bool flush_local_connection(const std::shared_ptr<LocalConnection>& conn, std::string& error);
-    void close_local_connection(const std::shared_ptr<LocalConnection>& conn);
-    void drain_pending_conn_close();
-    std::shared_ptr<LocalStream> try_parse_next_request(const std::shared_ptr<LocalConnection>& conn);
 
     void close_all_streams();
 
@@ -523,14 +470,6 @@ private:
     // H2 stream IDs whose data providers need to be resumed (written by pump, read by io)
     std::mutex resume_mutex_;
     std::set<int32_t> pending_resume_;
-
-    // Local TCP connections (pump_thread owned)
-    // Maps socket → LocalConnection
-    std::map<socket_t, std::shared_ptr<LocalConnection>> connections_;
-
-    // Connections to close (written by io_thread, consumed by pump_thread)
-    std::mutex conn_close_mutex_;
-    std::deque<std::shared_ptr<LocalConnection>> pending_conn_close_;
 
     // Decoy/virtual GET requests (io_thread only, no mutex needed)
     std::set<int32_t> decoy_stream_ids_;
@@ -618,98 +557,6 @@ bool ClientRuntime::start() {
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP Request Boundary Detection (for pipelined HTTP requests)
 // ─────────────────────────────────────────────────────────────────────────────
-
-bool parse_http_boundary(const std::vector<uint8_t>& buf, HttpRequestBoundary& out) {
-    // Find end of headers
-    const char* data = reinterpret_cast<const char*>(buf.data());
-    std::size_t size = buf.size();
-
-    const char* eol = std::search(data, data + size, "\r\n\r\n", "\r\n\r\n" + 4);
-    if (eol == data + size) {
-        out.complete = false;
-        return false;  // Headers not complete
-    }
-
-    std::size_t header_len = (eol - data) + 4;
-    out.header_len = header_len;
-
-    // Parse request line
-    std::istringstream stream(std::string(data, eol - data - 2));
-    std::string method, target, version;
-    if (!(stream >> method >> target >> version)) {
-        return false;  // Invalid request line
-    }
-
-    out.method = method;
-    out.target = target;
-
-    // For CONNECT, parse the target as host:port
-    if (ascii_lower(method) == "connect") {
-        const auto colon = target.rfind(':');
-        if (colon != std::string::npos) {
-            out.remote_host = target.substr(0, colon);
-            try {
-                out.remote_port = static_cast<uint16_t>(std::stoi(target.substr(colon + 1)));
-            } catch (...) {
-                out.remote_port = 443;  // default HTTPS port
-            }
-        } else {
-            out.remote_host = target;
-            out.remote_port = 443;
-        }
-    }
-
-    // Parse headers for Content-Length, Transfer-Encoding, Connection
-    std::string line;
-    std::size_t body_len = 0;
-    bool has_content_length = false;
-    bool chunked_encoding = false;
-
-    while (std::getline(stream, line)) {
-        if (line.empty() || line == "\r") break;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-
-        const auto colon = line.find(':');
-        if (colon == std::string::npos) continue;
-
-        std::string hname = line.substr(0, colon);
-        std::string hvalue = line.substr(colon + 1);
-
-        // Trim whitespace
-        while (!hname.empty() && std::isspace(hname.back())) hname.pop_back();
-        while (!hvalue.empty() && std::isspace(hvalue[0])) hvalue = hvalue.substr(1);
-
-        if (ascii_lower(hname) == "content-length") {
-            try {
-                body_len = std::stoul(hvalue);
-                has_content_length = true;
-            } catch (...) {}
-        } else if (ascii_lower(hname) == "transfer-encoding") {
-            if (hvalue.find("chunked") != std::string::npos) {
-                chunked_encoding = true;
-            }
-        } else if (ascii_lower(hname) == "connection") {
-            if (ascii_lower(hvalue).find("close") != std::string::npos) {
-                out.keep_alive = false;
-            }
-        }
-    }
-
-    // Methods that must not have a body
-    std::string method_lower = ascii_lower(method);
-    if (method_lower == "get" || method_lower == "head" || method_lower == "delete" ||
-        method_lower == "options" || method_lower == "trace") {
-        body_len = 0;
-        has_content_length = true;
-    }
-
-    out.chunked = chunked_encoding;
-    out.body_len = body_len;
-    out.complete = !chunked_encoding && (has_content_length || body_len == 0);
-
-    return out.complete;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // IO thread
 // ─────────────────────────────────────────────────────────────────────────────
@@ -926,18 +773,8 @@ void ClientRuntime::process_pending_tunnels() {
     for (auto& pt : tunnels) {
         auto stream = std::make_shared<LocalStream>();
 
-        // Determine if this is SOCKS5 or HTTP path
-        bool is_http_path = pt.conn != nullptr;
-
-        if (!is_http_path) {
-            // SOCKS5 path: stream owns the socket
-            stream->sock = pt.sock;
-        } else {
-            // HTTP path: stream is owned by LocalConnection
-            stream->conn = pt.conn;
-            stream->sock = kInvalidSocket;
-        }
-
+        // Unified path: all protocols use stream->sock directly
+        stream->sock = pt.sock;
         stream->protocol        = pt.protocol;
         stream->initial_payload = std::move(pt.initial_payload);
 
@@ -978,9 +815,7 @@ void ClientRuntime::process_pending_tunnels() {
             h2_, nullptr, hdrs.data(), hdrs.size(), &provider, this);
         if (sid < 0) {
             PROXY_LOG(Error, "[client] H2 CONNECT submit 失败: " << nghttp2_strerror(sid));
-            if (!is_http_path) {
-                close_socket(pt.sock);
-            }
+            close_socket(pt.sock);
             continue;
         }
 
@@ -988,14 +823,6 @@ void ClientRuntime::process_pending_tunnels() {
         {
             std::lock_guard<std::mutex> lock(streams_mutex_);
             streams_[sid] = stream;
-        }
-
-        // For HTTP path: now add the stream to the connection's queue
-        // (after h2_stream_id has been assigned)
-        if (is_http_path && pt.conn) {
-            std::lock_guard<std::mutex> lock(pt.conn->mutex);
-            pt.conn->stream_queue.push_back(stream);
-            PROXY_LOG(Debug, "[client] added stream " << sid << " to connection queue");
         }
 
         PROXY_LOG(Info, "[client] H2 CONNECT stream=" << sid << " target=" << authority
@@ -1117,7 +944,6 @@ void ClientRuntime::handle_stream_open(int32_t h2_stream_id,
     LocalProxyProtocol protocol;
     socket_t sock = kInvalidSocket;
     std::vector<std::uint8_t> initial;
-    auto conn = stream->conn;
 
     {
         std::lock_guard<std::mutex> sl(stream->mutex);
@@ -1132,12 +958,6 @@ void ClientRuntime::handle_stream_open(int32_t h2_stream_id,
         }
     }
 
-    // For HTTP path: get socket from connection
-    if (conn && sock == kInvalidSocket) {
-        std::lock_guard<std::mutex> cl(conn->mutex);
-        sock = conn->sock;
-    }
-
     if (sock == kInvalidSocket) {
         return;  // No valid socket
     }
@@ -1149,13 +969,6 @@ void ClientRuntime::handle_stream_open(int32_t h2_stream_id,
     } else if (protocol == LocalProxyProtocol::HttpConnect) {
         send_http_proxy_response(sock, 200, "Connection Established");
         PROXY_LOG(Debug, "[client] stream=" << h2_stream_id << " HTTP CONNECT 200 已发送");
-
-        // For HTTP CONNECT: mark connection as in CONNECT mode (opaque TLS tunnel)
-        if (conn) {
-            std::lock_guard<std::mutex> cl(conn->mutex);
-            conn->is_connect_mode = true;
-            conn->active_recv_stream = stream;
-        }
     }
     // HttpForward: transparent, no reply
 
@@ -1296,11 +1109,8 @@ int ClientRuntime::on_data_chunk_recv(nghttp2_session* /*session*/, uint8_t /*fl
     {
         std::lock_guard<std::mutex> sl(stream->mutex);
 
-        // For SOCKS5 path: stream owns the socket
-        // For HTTP path: socket is owned by LocalConnection, so stream->sock is intentionally invalid
-        bool has_valid_socket = (stream->sock != kInvalidSocket) || (stream->conn != nullptr);
-
-        if (stream->state != LocalStream::State::Open || !has_valid_socket) {
+        // All streams own their socket directly
+        if (stream->state != LocalStream::State::Open || stream->sock == kInvalidSocket) {
             return 0;
         }
 
@@ -1361,7 +1171,6 @@ int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_
     }
 
     socket_t sock = kInvalidSocket;
-    auto conn = stream->conn;
 
     {
         std::lock_guard<std::mutex> sl(stream->mutex);
@@ -1371,39 +1180,9 @@ int ClientRuntime::on_stream_close(nghttp2_session* /*session*/, int32_t stream_
         stream->uplink_eof = true;
     }
 
-    // Handle HTTP path: dequeue from connection
-    if (conn) {
-        bool should_close_conn = false;
-        {
-            std::lock_guard<std::mutex> cl(conn->mutex);
-
-            // Remove stream from queue if it's at the front
-            if (!conn->stream_queue.empty() && conn->stream_queue.front() == stream) {
-                conn->stream_queue.pop_front();
-
-                // Check if connection should close
-                if (conn->stream_queue.empty() && conn->recv_eof) {
-                    should_close_conn = true;
-                }
-            }
-        }
-
-        if (should_close_conn) {
-            // Queue connection for closure by pump thread
-            {
-                std::lock_guard<std::mutex> cl(self->conn_close_mutex_);
-                self->pending_conn_close_.push_back(conn);
-            }
-            signal_notifier(self->local_loop_notifier_, "client", "conn-close");
-        } else {
-            // Signal pump thread to flush next queued stream
-            signal_notifier(self->local_loop_notifier_, "client", "stream-closed");
-        }
-    } else {
-        // SOCKS5 path: close socket immediately
-        if (sock != kInvalidSocket) close_socket(sock);
-        signal_notifier(self->local_loop_notifier_, "client", "stream-closed");
-    }
+    // Close socket immediately (all protocols use stream->sock now)
+    if (sock != kInvalidSocket) close_socket(sock);
+    signal_notifier(self->local_loop_notifier_, "client", "stream-closed");
 
     PROXY_LOG(Debug, "[client] H2 stream=" << stream_id << " 已关闭");
     return 0;
@@ -1432,9 +1211,6 @@ void ClientRuntime::accept_and_pump_loop() {
     std::map<socket_t, std::shared_ptr<LocalStream>> socket_to_stream;  // Fast lookup index
 
     while (running_) {
-        // Drain pending connection closures
-        drain_pending_conn_close();
-
         // Retry any incomplete handshakes at the start of each iteration
         // This ensures fast processing of incoming handshake data
         retry_pending_handshakes();
@@ -1446,20 +1222,6 @@ void ClientRuntime::accept_and_pump_loop() {
         // Add pending handshake sockets to watch list (wait for more data)
         for (const auto& handshake : pending_handshakes_) {
             desired[handshake.sock] = {true, false};  // readable, not writable
-        }
-
-        // Add HTTP connection sockets to watch list
-        for (const auto& [sock, conn] : connections_) {
-            bool wants_write = false;
-            {
-                std::lock_guard<std::mutex> lk(conn->mutex);
-                if (!conn->stream_queue.empty()) {
-                    auto front = conn->stream_queue.front();
-                    std::lock_guard<std::mutex> sl(front->mutex);
-                    wants_write = front->pending_downlink_offset < front->pending_downlink.size();
-                }
-            }
-            desired[sock] = {true, wants_write};
         }
 
         std::vector<std::shared_ptr<LocalStream>> snapshot;
@@ -1536,49 +1298,6 @@ void ClientRuntime::accept_and_pump_loop() {
             if (is_pending_handshake) {
                 // Retry pending handshakes (will process this socket's event)
                 retry_pending_handshakes();
-                continue;
-            }
-
-            // Check if this event is for an HTTP connection socket
-            auto conn_it = connections_.find(ev.sock);
-            if (conn_it != connections_.end()) {
-                auto& conn = conn_it->second;
-                PROXY_LOG(Debug, "[client] accept_and_pump_loop: HTTP connection event"
-                              << " readable=" << ev.readable << " writable=" << ev.writable
-                              << " error=" << ev.error << " hangup=" << ev.hangup
-                              << " is_connect_mode=" << conn->is_connect_mode);
-                if (ev.error) {
-                    PROXY_LOG(Warn, "[client] accept_and_pump_loop: socket error, closing connection");
-                    close_local_connection(conn);
-                    continue;
-                }
-                if (ev.hangup && !ev.readable && !ev.writable) {
-                    // Only close if no pending operations
-                    std::lock_guard<std::mutex> lk(conn->mutex);
-                    bool has_pending = !conn->stream_queue.empty();
-                    if (has_pending) {
-                        PROXY_LOG(Debug, "[client] hangup with pending streams, continuing");
-                    } else {
-                        PROXY_LOG(Info, "[client] accept_and_pump_loop: closing connection due to hangup");
-                        close_local_connection(conn);
-                        continue;
-                    }
-                } else if (ev.hangup) {
-                    PROXY_LOG(Debug, "[client] hangup with readable/writable, continuing to process");
-                }
-                if (ev.writable) {
-                    std::string err;
-                    PROXY_LOG(Debug, "[client] accept_and_pump_loop: flushing downlink data");
-                    flush_local_connection(conn, err);
-                    if (!err.empty()) {
-                        PROXY_LOG(Debug, "[client] flush error: " << err);
-                        close_local_connection(conn);
-                    }
-                }
-                if (ev.readable) {
-                    PROXY_LOG(Debug, "[client] accept_and_pump_loop: calling pump_local_connection");
-                    pump_local_connection(conn);
-                }
                 continue;
             }
 
@@ -1842,45 +1561,18 @@ void ClientRuntime::retry_pending_handshakes() {
                           << " proto=" << (accepted.protocol == LocalProxyProtocol::HttpConnect ? "http-connect"
                                                                                                 : "http"));
 
-                // For HTTP (CONNECT and Forward): use new LocalConnection path
-                if (accepted.protocol == LocalProxyProtocol::HttpConnect ||
-                    accepted.protocol == LocalProxyProtocol::HttpForward) {
-                    // Create new LocalConnection for this socket
-                    auto conn = std::make_shared<LocalConnection>();
-                    conn->sock = handshake.sock;
-                    conn->is_connect_mode = false;
-                    conn->recv_buf.assign(handshake.raw_request.begin(), handshake.raw_request.end());
-
-                    PROXY_LOG(Info, "[client] created LocalConnection for HTTP request, "
-                              << "buf_size=" << conn->recv_buf.size()
-                              << " protocol=" << (accepted.protocol == LocalProxyProtocol::HttpConnect ? "CONNECT" : "FORWARD"));
-
-                    // Add to connections map
-                    connections_[handshake.sock] = conn;
-
-                    // Immediately process buffered HTTP request (we're in pump thread, safe to do)
-                    // This ensures the request gets parsed and H2 stream created even if socket
-                    // won't become readable again (client is waiting for response)
-                    PROXY_LOG(Info, "[client] calling pump_local_connection immediately after handshake");
-                    pump_local_connection(conn);
-
-                    // Signal in case more processing is needed
-                    signal_notifier(local_loop_notifier_, "client", "new-conn");
-                    should_erase = true;
-                } else {
-                    // SOCKS5 path: use old pending_tunnels_ mechanism
-                    {
-                        std::lock_guard<std::mutex> lock(pending_mutex_);
-                        PendingTunnel pt;
-                        pt.sock = handshake.sock;  // SOCKS5 path
-                        pt.target = accepted.target;
-                        pt.protocol = accepted.protocol;
-                        pt.initial_payload = std::move(accepted.initial_payload);
-                        pending_tunnels_.push_back(pt);
-                    }
-                    signal_notifier(io_notifier_, "client", "new-tunnel");
-                    should_erase = true;
+                // Unified path: all protocols (SOCKS5, HTTP CONNECT, HTTP Forward) use pending_tunnels_
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    PendingTunnel pt;
+                    pt.sock = handshake.sock;
+                    pt.target = accepted.target;
+                    pt.protocol = accepted.protocol;
+                    pt.initial_payload = std::move(accepted.initial_payload);
+                    pending_tunnels_.push_back(pt);
                 }
+                signal_notifier(io_notifier_, "client", "new-tunnel");
+                should_erase = true;
             } else {
                 // Parse error
                 PROXY_LOG(Warn, "[client] 握手解析失败: " << parse_error);
@@ -2040,426 +1732,9 @@ void ClientRuntime::close_local_stream(const std::shared_ptr<LocalStream>& strea
     signal_notifier(local_loop_notifier_, "client", "local-closed");
 }
 
-void ClientRuntime::drain_pending_conn_close() {
-    std::deque<std::shared_ptr<LocalConnection>> to_close;
-    {
-        std::lock_guard<std::mutex> lk(conn_close_mutex_);
-        to_close.swap(pending_conn_close_);
-    }
-
-    for (auto& conn : to_close) {
-        if (conn && conn->sock != kInvalidSocket) {
-            close_socket(conn->sock);
-            connections_.erase(conn->sock);
-        }
-    }
-}
-
-void ClientRuntime::pump_local_connection(const std::shared_ptr<LocalConnection>& conn) {
-    if (!conn || conn->sock == kInvalidSocket) return;
-
-    // Try to receive new data from socket
-    {
-        std::array<uint8_t, kTunnelIoChunkSize> buf{};
-#ifdef _WIN32
-        const int ret = ::recv(conn->sock, reinterpret_cast<char*>(buf.data()),
-                               static_cast<int>(buf.size()), 0);
-#else
-        const int ret = static_cast<int>(::recv(conn->sock, buf.data(), buf.size(), 0));
-#endif
-
-        if (ret > 0) {
-            // Buffer the received data
-            std::lock_guard<std::mutex> lk(conn->mutex);
-            PROXY_LOG(Debug, "[client] pump_local_connection: received " << ret << " bytes from socket"
-                          << " is_connect_mode=" << conn->is_connect_mode
-                          << " stream_queue_size=" << conn->stream_queue.size());
-            conn->recv_buf.insert(conn->recv_buf.end(), buf.data(), buf.data() + ret);
-        } else if (ret == 0) {
-            // EOF from socket
-            std::lock_guard<std::mutex> lk(conn->mutex);
-            PROXY_LOG(Info, "[client] pump_local_connection: socket EOF");
-            conn->recv_eof = true;
-        } else if (ret < 0 && !is_socket_would_block(proxy::last_socket_error_code())) {
-            // Real error (not EAGAIN)
-            std::lock_guard<std::mutex> lk(conn->mutex);
-            PROXY_LOG(Error, "[client] pump_local_connection: socket error");
-            conn->recv_eof = true;
-        }
-        // If EAGAIN, just continue with processing buffered data
-    }
-
-    // Process buffered data
-    while (true) {
-        // Check what processing is needed (under lock)
-        bool should_process_connect = false;
-        bool should_process_body = false;
-        bool should_parse_request = false;
-        std::shared_ptr<LocalStream> active_stream;
-        std::size_t body_remaining = 0;
-        std::size_t recv_buf_size = 0;
-
-        {
-            std::lock_guard<std::mutex> lk(conn->mutex);
-
-            recv_buf_size = conn->recv_buf.size();
-
-            // If in CONNECT mode or pipeline broken, pass all bytes to active stream
-            if (conn->is_connect_mode || conn->pipeline_broken) {
-                should_process_connect = !conn->stream_queue.empty() && !conn->recv_buf.empty();
-            } else if (conn->body_remaining > 0) {
-                // Forward mode: route bytes to current request stream
-                should_process_body = conn->active_recv_stream && !conn->recv_buf.empty();
-                active_stream = conn->active_recv_stream;
-                body_remaining = conn->body_remaining;
-            } else {
-                // At request boundary: try to parse next request
-                should_parse_request = !conn->recv_buf.empty();
-            }
-        }
-
-        // Process outside the lock to avoid deadlock
-        if (should_process_connect) {
-            std::lock_guard<std::mutex> lk(conn->mutex);
-            if (!conn->stream_queue.empty() && !conn->recv_buf.empty()) {
-                auto stream = conn->stream_queue.front();
-                {
-                    std::lock_guard<std::mutex> sl(stream->mutex);
-                    const std::size_t data_size = conn->recv_buf.size();
-                    PROXY_LOG(Info, "[client] CONNECT mode: forwarding " << data_size << " bytes to stream"
-                                  << " h2_stream_id=" << stream->h2_stream_id
-                                  << " state=" << static_cast<int>(stream->state)
-                                  << " uplink_deferred=" << stream->uplink_deferred);
-                    stream->pending_uplink.insert(stream->pending_uplink.end(),
-                                                  conn->recv_buf.begin(), conn->recv_buf.end());
-                    bool should_resume = stream->uplink_deferred;
-                    conn->recv_buf.clear();
-                    if (should_resume) {
-                        PROXY_LOG(Debug, "[client] CONNECT mode: resuming deferred uplink for stream=" << stream->h2_stream_id);
-                        std::lock_guard<std::mutex> rl(resume_mutex_);
-                        pending_resume_.insert(stream->h2_stream_id);
-                    }
-                }
-                signal_notifier(io_notifier_, "client", "uplink-data");
-            } else {
-                PROXY_LOG(Debug, "[client] CONNECT mode: cannot process - queue_empty=" << conn->stream_queue.empty()
-                              << " buf_empty=" << conn->recv_buf.empty());
-            }
-            break;
-        }
-
-        if (should_process_body && active_stream) {
-            std::size_t to_send = 0;
-            {
-                std::lock_guard<std::mutex> lk(conn->mutex);
-                to_send = std::min(conn->body_remaining, conn->recv_buf.size());
-            }
-
-            if (to_send > 0) {
-                {
-                    std::lock_guard<std::mutex> sl(active_stream->mutex);
-                    active_stream->pending_uplink.insert(active_stream->pending_uplink.end(),
-                                                  conn->recv_buf.begin(),
-                                                  conn->recv_buf.begin() + to_send);
-                    bool should_resume = active_stream->uplink_deferred;
-                    if (should_resume) {
-                        std::lock_guard<std::mutex> rl(resume_mutex_);
-                        pending_resume_.insert(active_stream->h2_stream_id);
-                    }
-                }
-                {
-                    std::lock_guard<std::mutex> lk(conn->mutex);
-                    conn->body_remaining -= to_send;
-                    conn->recv_buf.erase(conn->recv_buf.begin(), conn->recv_buf.begin() + to_send);
-                }
-                signal_notifier(io_notifier_, "client", "uplink-data");
-
-                if (conn->body_remaining > 0) break;  // Wait for more data
-            } else {
-                break;
-            }
-            continue;
-        }
-
-        if (should_parse_request && recv_buf_size > 0) {
-            auto new_stream = try_parse_next_request(conn);
-            if (!new_stream) break;  // Incomplete headers or parse error
-            {
-                std::lock_guard<std::mutex> lk(conn->mutex);
-                conn->active_recv_stream = new_stream;
-            }
-            continue;
-        }
-
-        break;
-    }
-}
-
-bool ClientRuntime::flush_local_connection(const std::shared_ptr<LocalConnection>& conn,
-                                             std::string& error) {
-    if (!conn || conn->sock == kInvalidSocket) return true;
-
-    std::lock_guard<std::mutex> lk(conn->mutex);
-    if (conn->stream_queue.empty()) return true;
-
-    // Only flush the head-of-queue stream to enforce HTTP/1.1 pipelining order
-    auto front = conn->stream_queue.front();
-
-    std::lock_guard<std::mutex> sl(front->mutex);
-    if (front->state != LocalStream::State::Open) {
-        return true;
-    }
-    // For HTTP paths, stream owns socket via connection, not directly
-    // So don't check front->sock == kInvalidSocket for HTTP streams
-
-    // Send pending downlink data to socket
-    while (front->pending_downlink_offset < front->pending_downlink.size()) {
-        const auto* data = front->pending_downlink.data() + front->pending_downlink_offset;
-        const std::size_t remaining = front->pending_downlink.size() - front->pending_downlink_offset;
-
-#ifdef _WIN32
-        const int ret = ::send(conn->sock, reinterpret_cast<const char*>(data),
-                               static_cast<int>(remaining), 0);
-#else
-        const int ret = static_cast<int>(::send(conn->sock, data, remaining, 0));
-#endif
-        if (ret > 0) {
-            front->pending_downlink_offset += ret;
-            continue;
-        }
-        if (ret < 0 && is_socket_would_block(proxy::last_socket_error_code())) {
-            break;  // EAGAIN: socket buffer full
-        }
-        error = "socket send failed: " + proxy::socket_error_string();
-        return false;
-    }
-
-    // If fully flushed, clear the buffer
-    if (front->pending_downlink_offset >= front->pending_downlink.size()) {
-        front->pending_downlink.clear();
-        front->pending_downlink_offset = 0;
-    } else if (front->pending_downlink_offset >= kTunnelIoChunkSize) {
-        // Optimization: move remaining data to front
-        const std::size_t remaining = front->pending_downlink.size() - front->pending_downlink_offset;
-        if (remaining > 0) {
-            std::memmove(front->pending_downlink.data(),
-                         front->pending_downlink.data() + front->pending_downlink_offset,
-                         remaining);
-        }
-        front->pending_downlink.resize(remaining);
-        front->pending_downlink_offset = 0;
-    }
-
-    return true;
-}
-
-void ClientRuntime::close_local_connection(const std::shared_ptr<LocalConnection>& conn) {
-    if (!conn) return;
-
-    socket_t sock = kInvalidSocket;
-    {
-        std::lock_guard<std::mutex> lk(conn->mutex);
-        sock = conn->sock;
-
-        // Close all streams in the queue
-        for (auto& stream : conn->stream_queue) {
-            std::lock_guard<std::mutex> sl(stream->mutex);
-            stream->state = LocalStream::State::Closed;
-            stream->uplink_eof = true;
-            stream->sock = kInvalidSocket;
-        }
-        conn->stream_queue.clear();
-        conn->recv_buf.clear();
-    }
-
-    // Close socket
-    if (sock != kInvalidSocket) {
-        close_socket(sock);
-        connections_.erase(sock);
-    }
-}
-
-std::shared_ptr<LocalStream> ClientRuntime::try_parse_next_request(
-    const std::shared_ptr<LocalConnection>& conn) {
-    if (!conn) {
-        PROXY_LOG(Warn, "[client] try_parse_next_request: conn is nullptr");
-        return nullptr;
-    }
-
-    std::lock_guard<std::mutex> lk(conn->mutex);
-    if (conn->recv_buf.empty()) {
-        PROXY_LOG(Debug, "[client] try_parse_next_request: recv_buf is empty");
-        return nullptr;
-    }
-
-    PROXY_LOG(Debug, "[client] try_parse_next_request: parsing "
-              << conn->recv_buf.size() << " bytes");
-
-    // Parse HTTP request boundary from buffer
-    HttpRequestBoundary boundary;
-    if (!parse_http_boundary(conn->recv_buf, boundary)) {
-        PROXY_LOG(Debug, "[client] try_parse_next_request: parse_http_boundary returned false (incomplete?)");
-        return nullptr;  // Headers not complete yet
-    }
-
-    PROXY_LOG(Info, "[client] try_parse_next_request: parsed request method='"
-              << boundary.method << "' target='" << boundary.remote_host << ":" << boundary.remote_port << "'");
-
-    // For chunked or keep-alive=false: fall back to non-pipelined mode
-    if (boundary.chunked || !boundary.keep_alive) {
-        conn->pipeline_broken = true;
-    }
-
-    // Extract request data from buffer
-    const std::size_t request_len = boundary.header_len + boundary.body_len;
-    if (conn->recv_buf.size() < request_len) {
-        return nullptr;  // Body not complete yet
-    }
-
-    // Create a new LocalStream for this request
-    auto stream = std::make_shared<LocalStream>();
-    stream->h2_stream_id = -1;
-    stream->sock = kInvalidSocket;  // Will be set to null (stream doesn't own socket)
-    stream->conn = conn;
-    stream->protocol = LocalProxyProtocol::HttpConnect;  // Default: will be overridden
-    stream->state = LocalStream::State::Pending;
-
-    // Parse the HTTP request
-    std::istringstream req_stream(std::string(reinterpret_cast<const char*>(conn->recv_buf.data()),
-                                              boundary.header_len));
-    std::string line;
-    std::string method, target, version;
-
-    // Request line
-    if (!std::getline(req_stream, line) || line.size() < 2) {
-        return nullptr;
-    }
-    if (line.back() == '\r') line.pop_back();
-    {
-        std::istringstream rls(line);
-        if (!(rls >> method >> target >> version)) {
-            return nullptr;
-        }
-    }
-
-    // Parse headers to determine protocol
-    Socks5Request socks_req;
-    bool is_connect = (ascii_lower(method) == "connect");
-
-    // Security: if socket is already in CONNECT mode, reject new requests
-    if (is_connect && conn->is_connect_mode) {
-        PROXY_LOG(Warn, "[client] try_parse_next_request: rejecting CONNECT on already-CONNECT socket"
-                      << " (target=" << socks_req.host << ":" << socks_req.port << ")");
-        return nullptr;
-    }
-
-    // Also log when we're parsing a CONNECT while socket is NOT yet in CONNECT mode
-    if (is_connect && !conn->stream_queue.empty()) {
-        PROXY_LOG(Warn, "[client] try_parse_next_request: CONNECT while previous stream still pending"
-                      << " (queue_size=" << conn->stream_queue.size()
-                      << " is_connect_mode=" << conn->is_connect_mode << ")");
-    }
-
-    if (is_connect) {
-        // CONNECT target:port
-        const auto colon = target.rfind(':');
-        if (colon == std::string::npos) {
-            return nullptr;  // Invalid CONNECT
-        }
-        socks_req.host = target.substr(0, colon);
-        try {
-            socks_req.port = std::stoi(target.substr(colon + 1));
-        } catch (...) {
-            return nullptr;
-        }
-        socks_req.atyp = detect_atyp_from_host(socks_req.host);
-        stream->protocol = LocalProxyProtocol::HttpConnect;
-    } else {
-        // HTTP Forward (GET/POST/etc)
-        // Extract Host header
-        std::string host_header;
-        std::string lowered_target = ascii_lower(target);
-
-        if (lowered_target.rfind("http://", 0) == 0) {
-            // Absolute URI
-            const std::string authority_and_path = target.substr(7);
-            const auto slash = authority_and_path.find('/');
-            host_header = (slash == std::string::npos) ? authority_and_path
-                                                        : authority_and_path.substr(0, slash);
-        } else {
-            // Relative URI - need Host header
-            for (std::string hdr; std::getline(req_stream, hdr);) {
-                if (hdr.size() >= 2 && hdr.back() == '\r') hdr.pop_back();
-                if (hdr.empty()) break;
-
-                const auto colon = hdr.find(':');
-                if (colon != std::string::npos) {
-                    std::string hname = hdr.substr(0, colon);
-                    if (ascii_lower(hname) == "host") {
-                        host_header = hdr.substr(colon + 1);
-                        // Trim leading whitespace
-                        while (!host_header.empty() && std::isspace(host_header[0])) {
-                            host_header = host_header.substr(1);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (host_header.empty()) {
-            return nullptr;
-        }
-
-        // Parse host:port
-        const auto colon = host_header.rfind(':');
-        if (colon != std::string::npos) {
-            socks_req.host = host_header.substr(0, colon);
-            try {
-                socks_req.port = std::stoi(host_header.substr(colon + 1));
-            } catch (...) {
-                socks_req.host = host_header;
-                socks_req.port = 80;
-            }
-        } else {
-            socks_req.host = host_header;
-            socks_req.port = 80;
-        }
-        socks_req.atyp = detect_atyp_from_host(socks_req.host);
-        stream->protocol = LocalProxyProtocol::HttpForward;
-
-        // For forward mode: store the original request as initial_payload
-        stream->initial_payload.assign(conn->recv_buf.begin(),
-                                       conn->recv_buf.begin() + request_len);
-    }
-
-    // Create PendingTunnel and queue it
-    {
-        std::lock_guard<std::mutex> tl(pending_mutex_);
-        PendingTunnel pt;
-        pt.conn = conn;
-        pt.target = socks_req;
-        pt.protocol = stream->protocol;
-        pt.initial_payload = std::move(stream->initial_payload);
-        pending_tunnels_.push_back(pt);
-    }
-
-    // NOTE: Stream will be added to connection queue by process_pending_tunnels
-    // after h2_stream_id is assigned. This avoids race condition where pump thread
-    // tries to forward data before stream is submitted to nghttp2.
-
-    // Remove request from recv_buf and set up body_remaining
-    conn->recv_buf.erase(conn->recv_buf.begin(), conn->recv_buf.begin() + request_len);
-    conn->body_remaining = 0;  // At boundary: ready to parse next
-
-    // Signal IO thread
-    signal_notifier(io_notifier_, "client", "new-tunnel");
-
-    return stream;
-}
 
 void ClientRuntime::close_all_streams() {
-    // Close all streams (SOCKS5 path)
+    // Close all streams
     std::map<int32_t, std::shared_ptr<LocalStream>> current;
     {
         std::lock_guard<std::mutex> lock(streams_mutex_);
@@ -2475,12 +1750,6 @@ void ClientRuntime::close_all_streams() {
             kv.second->uplink_eof = true;
         }
         if (sock != kInvalidSocket) close_socket(sock);
-    }
-
-    // Close all HTTP connections
-    auto conns = connections_;  // Copy map
-    for (auto& [sock, conn] : conns) {
-        close_local_connection(conn);
     }
 }
 
